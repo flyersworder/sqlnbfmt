@@ -1,0 +1,28 @@
+[project]
+name = "sqlnbfmt"
+version = "0.1.0"
+description = "A tool to format SQL code in Jupyter notebooks."
+authors = [
+  { name = "Qing", email = "qingye779@gmail.com" }
+]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "astor>=0.8.1",
+    "nbformat>=5.10.4",
+    "pyyaml>=6.0.2",
+    "sqlglot>=25.27.0",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.3.3",
+]
+
+[build-system]
+requires = ["uv>=0.1.0"]
+build-backend = "uv.build"
+
+[tool.uv.scripts]
+sqlnbfmt = "sqlnbfmt.formatter:main"
