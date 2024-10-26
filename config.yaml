@@ -1,0 +1,47 @@
+# config.yaml
+
+sql_keywords:
+  - SELECT
+  - FROM
+  - WHERE
+  - INSERT
+  - UPDATE
+  - DELETE
+  - WITH
+  - JOIN
+  - CREATE
+  - DROP
+  - ALTER
+  - TRUNCATE
+  - UNION
+  - EXCEPT
+  - INTERSECT
+  - GROUP BY
+  - ORDER BY
+  - HAVING
+  - LIMIT
+  - OFFSET
+  - DISTINCT
+
+function_names:
+  - read_sql
+  - read_sql_query
+  - read_sql_table
+  - execute
+  - executescript
+  - fetchall
+  - fetchone
+  - fetchmany
+  - exeucte_query
+
+# Decorator names that contain SQL
+sql_decorators:
+  - sql_decorator
+  - query
+  - sql_query
+  - db_query
+
+# Formatting options
+formatting_options:
+  single_line_threshold: 80  # Maximum length for single-line SQL
+  indent_width: 4           # Number of spaces for indentation
