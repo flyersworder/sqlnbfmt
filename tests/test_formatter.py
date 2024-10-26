@@ -1,11 +1,12 @@
 # tests/test_formatter.py
 
+import ast
 import pytest
 import re
 import nbformat
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional
 
 from sqlnbfmt.formatter import (
     format_sql_code,
@@ -13,20 +14,21 @@ from sqlnbfmt.formatter import (
     FormattingConfig,
     SQLFormattingError
 )
-from sqlglot import errors, parse_one
-from sqlglot.tokens import TokenError  # Ensure TokenError is imported
+from sqlglot import errors
+from sqlglot.errors import TokenError
 
 # Helper function to normalize SQL for comparison
 def normalize_sql(sql: str) -> str:
-    sql = re.sub(r'\s+', ' ', sql)      # Replace multiple spaces with single space
+    sql = re.sub(r'\s+', ' ', sql)      # Replace multiple spaces with a single space
     sql = re.sub(r'\(\s+', '(', sql)    # Remove space after '('
     sql = re.sub(r'\s+\)', ')', sql)    # Remove space before ')'
+    sql = re.sub(r'\s*,\s*', ', ', sql) # Normalize commas and surrounding spaces
     return sql.strip().upper()
 
 # Setup logging for tests
 def setup_logging(level: str) -> logging.Logger:
-    logger = logging.getLogger('sqlnbfmt')
-    logger.setLevel(level)
+    logger = logging.getLogger('formatter')
+    logger.setLevel(level.upper())
     if not logger.handlers:
         handler = logging.StreamHandler()
         formatter = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
@@ -42,7 +44,6 @@ def sample_config():
         function_names={'execute_sql', 'run_query'},
         sql_decorators={'@sql'},
         single_line_threshold=80,
-        preserve_comments=True,
         indent_width=4
     )
 
@@ -92,8 +93,7 @@ def test_format_sql_code_special_characters(sample_config):
     """
     # In MySQL, '#' denotes a comment, so '`#column2`' should be quoted to avoid being treated as a comment
     formatted = format_sql_code(sql, "mysql", sample_config)
-    # Update expected to include backticks for `TABLE` and `CONDITION`
-    expected = "SELECT @COLUMN1, `#COLUMN2`, $COLUMN3 FROM `TABLE` WHERE `CONDITION` = '@value'"
+    expected = "SELECT @column1, `#column2`, $column3 FROM `table` WHERE `condition` = '@value'"
     assert normalize_sql(expected) == normalize_sql(formatted)
 
 # Test 5: Reserved Keywords as Identifiers
@@ -104,7 +104,7 @@ def test_format_sql_code_reserved_keywords(sample_config):
     sql = "SELECT `group`, `order` FROM `table` WHERE `select` > 10"
     # Reserved keywords should be quoted to avoid parsing errors
     formatted = format_sql_code(sql, "mysql", sample_config)
-    expected = "SELECT `GROUP`, `ORDER` FROM `TABLE` WHERE `SELECT` > 10"
+    expected = "SELECT `group`, `order` FROM `table` WHERE `select` > 10"
     assert normalize_sql(expected) == normalize_sql(formatted)
 
 # Test 6: Process Notebook with Various SQL Scenarios
@@ -114,7 +114,7 @@ def test_process_notebook(tmp_path, sample_config):
     """
     # Create a sample notebook
     nb = nbformat.v4.new_notebook()
-    nb.cells.append(nbformat.v4.new_code_cell("SELECT * FROM table"))
+    nb.cells.append(nbformat.v4.new_code_cell("execute_sql('SELECT * FROM table')"))
     notebook_path = tmp_path / "sample_notebook.ipynb"
     nbformat.write(nb, notebook_path)
 
@@ -129,7 +129,7 @@ def test_process_notebook(tmp_path, sample_config):
 
     # Verify first code cell
     first_cell = code_cells[0]
-    expected = "SELECT * FROM table"
+    expected = "execute_sql('SELECT * FROM table')"
     assert normalize_sql(expected) == normalize_sql(first_cell.source.strip())
 
 # Test 7: Process Real-World Notebook with Complex SQL Queries
@@ -173,16 +173,34 @@ ORDER BY login_count DESC
     nb_processed = nbformat.read(notebook_path, as_version=4)
     code_cells = [cell for cell in nb_processed.cells if cell.cell_type == "code"]
 
-    # Helper function to extract SQL from function calls
+    # Helper function to extract SQL from function calls using AST
     def extract_sql_from_execute(cell_source: str) -> Optional[str]:
-        match = re.search(r'execute_sql\("""(.*?)"""', cell_source, re.DOTALL | re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-        return None
+        try:
+            tree = ast.parse(cell_source)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and getattr(node.func, 'id', '') == 'execute_sql':
+                    # Assuming the first argument is the SQL code
+                    if node.args:
+                        arg = node.args[0]
+                        if isinstance(arg, (ast.Constant, ast.Constant)):
+                            return arg.value.strip()
+                        elif isinstance(arg, ast.JoinedStr):
+                            # Handle f-strings
+                            sql_parts = []
+                            for value in arg.values:
+                                if isinstance(value, (ast.Constant, ast.Constant)):
+                                    sql_parts.append(value.s if isinstance(value, ast.Constant) else value.value)
+                                else:
+                                    sql_parts.append("{expression}")
+                            return ''.join(sql_parts).strip()
+            return None
+        except Exception as e:
+            print(f"Error parsing cell source: {e}")
+            return None
 
     # Helper function to extract SQL from magic commands
     def extract_sql_from_magic(cell_source: str) -> Optional[str]:
-        match = re.search(r'%%sql\s*\n(.*)', cell_source, re.DOTALL | re.IGNORECASE)
+        match = re.match(r'%%sql\s*\n([\s\S]*)', cell_source, re.DOTALL | re.IGNORECASE)
         if match:
             return match.group(1).strip()
         return None
@@ -219,7 +237,7 @@ def test_logging_messages_various_levels(sample_config, caplog):
     """
     sql = "SELECT * FROM table"
     logger = setup_logging("DEBUG")
-    with caplog.at_level(logging.DEBUG, logger="sqlnbfmt.formatter"):
+    with caplog.at_level(logging.DEBUG, logger="formatter"):
         format_sql_code(sql, None, sample_config)
         assert "Original SQL:" in caplog.text
         assert "Formatted SQL:" in caplog.text
@@ -227,7 +245,7 @@ def test_logging_messages_various_levels(sample_config, caplog):
     caplog.clear()  # Clear previous logs
 
     logger = setup_logging("INFO")
-    with caplog.at_level(logging.INFO, logger="sqlnbfmt.formatter"):
+    with caplog.at_level(logging.INFO, logger="formatter"):
         format_sql_code(sql, None, sample_config)
         # DEBUG messages should not appear
         assert "Original SQL:" not in caplog.text
@@ -248,8 +266,7 @@ def test_format_sql_code_with_subqueries(sample_config):
     WHERE a.active = TRUE
     ORDER BY order_count DESC
     """
-    formatted = format_sql_code(sql, None, sample_config)  # dialect=None
-    # Define the expected subquery structure with 'AS' in aliasing
+    formatted = format_sql_code(sql, None, sample_config)
     expected_subquery = "(SELECT COUNT(*) FROM orders AS o WHERE o.user_id = a.id) AS order_count"
     assert normalize_sql(expected_subquery) in normalize_sql(formatted)
 
@@ -270,8 +287,7 @@ def test_format_sql_code_various_indentation(sample_config):
     WHERE condition
     ORDER BY column1 DESC
     """
-    formatted = format_sql_code(sql, None, sample_config)  # dialect=None
-    # Expect 2-space indentation
+    formatted = format_sql_code(sql, None, sample_config)
     expected = (
         "SELECT\n"
         "  column1,\n"
@@ -292,12 +308,10 @@ def test_format_sql_code_multiple_options(sample_config):
     sample_config.indent_width = 2
     sample_config.single_line_threshold = 50
     sql = "SELECT col1, col2 FROM table WHERE condition ORDER BY col1 DESC"
-    formatted = format_sql_code(sql, None, sample_config)  # dialect=None
+    formatted = format_sql_code(sql, None, sample_config)
     # Should be single line due to low threshold
     expected = "SELECT col1, col2 FROM table WHERE condition ORDER BY col1 DESC"
     assert normalize_sql(expected) == normalize_sql(formatted)
-
-# Additional Recommended Tests
 
 # Test 13: Common Table Expressions (CTEs) Formatting
 def test_format_sql_code_with_ctes(sample_config):
@@ -338,13 +352,13 @@ def test_format_sql_code_different_dialects(sample_config):
     """
     Test that SQL formatting respects different SQL dialects.
     """
-    sql = "SELECT * FROM \"my_table\" WHERE \"status\" = 'active'"
+    sql = 'SELECT * FROM "my_table" WHERE "status" = \'active\''
     formatted_pg = format_sql_code(sql, "postgres", sample_config)
-    expected_pg = "SELECT * FROM \"my_table\" WHERE \"status\" = 'active'"
+    expected_pg = 'SELECT * FROM "my_table" WHERE "status" = \'active\''
     assert normalize_sql(expected_pg) == normalize_sql(formatted_pg)
 
     formatted_sqlite = format_sql_code(sql, "sqlite", sample_config)
-    expected_sqlite = "SELECT * FROM \"my_table\" WHERE \"status\" = 'active'"
+    expected_sqlite = 'SELECT * FROM "my_table" WHERE "status" = \'active\''
     assert normalize_sql(expected_sqlite) == normalize_sql(formatted_sqlite)
 
 # Test 15: Window Functions Formatting
@@ -378,25 +392,15 @@ def test_format_sql_code_with_placeholders(sample_config):
 # Test 17: Handling Comments
 def test_format_sql_code_preserve_comments(sample_config):
     """
-    Test that SQL comments are preserved when preserve_comments is True.
+    Test that SQL comments are preserved in the formatted output.
     """
     sql = """
     -- This is a comment
     SELECT * FROM users -- Inline comment
     """
     formatted = format_sql_code(sql, None, sample_config)
-    expected = "/* This is a comment */ SELECT * FROM users /* Inline comment */"
-    assert normalize_sql(expected) == normalize_sql(formatted)
-
-def test_format_sql_code_remove_comments(sample_config):
+    expected = """
+    /* This is a comment */
+    SELECT * FROM users /* Inline comment */
     """
-    Test that SQL comments are removed when preserve_comments is False.
-    """
-    sample_config.preserve_comments = False
-    sql = """
-    -- This is a comment
-    SELECT * FROM users -- Inline comment
-    """
-    formatted = format_sql_code(sql, None, sample_config)
-    expected = "SELECT * FROM users"
     assert normalize_sql(expected) == normalize_sql(formatted)

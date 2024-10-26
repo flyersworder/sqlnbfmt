@@ -2,14 +2,14 @@ import ast
 import logging
 import re
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Set, Optional, Dict, Union, Tuple, List
 
 import nbformat
 import yaml
-from sqlglot.tokens import Token, Tokenizer
-from sqlglot import parse_one, errors, exp
+from sqlglot import parse_one, parse, errors
 from sqlglot.errors import TokenError
 
 
@@ -21,19 +21,17 @@ class FormattingConfig:
     function_names: Set[str]
     sql_decorators: Set[str]
     single_line_threshold: int = 80
-    preserve_comments: bool = True  # Although we remove comment handling, keeping the flag for potential future use
     indent_width: int = 4
 
 
 class SQLFormattingError(Exception):
     """Custom exception for SQL formatting errors."""
-
     pass
 
 
 def setup_logging(level: str = "INFO") -> logging.Logger:
     """Sets up logging with the specified level."""
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger('formatter')
     logger.setLevel(level.upper())
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stdout)
@@ -59,9 +57,6 @@ def load_config(config_path: Union[str, Path] = "config.yaml") -> FormattingConf
                 single_line_threshold=config.get("formatting_options", {}).get(
                     "single_line_threshold", 80
                 ),
-                preserve_comments=config.get("formatting_options", {}).get(
-                    "preserve_comments", True
-                ),
                 indent_width=config.get("formatting_options", {}).get(
                     "indent_width", 4
                 ),
@@ -76,12 +71,11 @@ def format_sql_code(
     config: FormattingConfig,
     placeholders: Optional[Dict[str, str]] = None,
     force_single_line: bool = False,
-    is_magic_command: bool = False,
-    is_cell_magic: bool = False,
+    ignore_placeholders: bool = False,
 ) -> str:
     """Formats SQL code using sqlglot's native formatting capabilities while preserving placeholders."""
     try:
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger('formatter')
 
         if not sql_code.strip():
             return sql_code
@@ -90,40 +84,32 @@ def format_sql_code(
         placeholder_mapping = {}
 
         # Handle placeholders for expressions
-        if placeholders:
-            for idx, (placeholder, value) in enumerate(placeholders.items()):
-                marker = f"__PLACEHOLDER_{idx}__"
+        if placeholders and not ignore_placeholders:
+            for expr_placeholder, expr in placeholders.items():
+                marker = f"'__EXPR_PLACEHOLDER_{uuid.uuid4()}__'"
+                temp_sql = temp_sql.replace(expr_placeholder, marker)
+                placeholder_mapping[marker.strip("'")] = expr_placeholder
+                logger.debug(f"Replaced placeholder {expr_placeholder} with marker {marker}")
+
+        # Automatically replace common placeholders (%s and ?) with unique markers
+        if not ignore_placeholders:
+            auto_placeholders = {'%s', '?'}
+            for placeholder in auto_placeholders:
+                unique_id = str(uuid.uuid4())
+                marker = f"'__AUTO_PLACEHOLDER_{unique_id}__'"
                 temp_sql = temp_sql.replace(placeholder, marker)
-                placeholder_mapping[marker] = placeholder
-                logger.debug(f"Replaced placeholder {placeholder} with marker {marker}")
-
-        # Automatically replace common placeholders (%s and ?)
-        # with unique markers to prevent parsing errors
-        # Define regex patterns for placeholders
-        placeholder_patterns = {
-            '%s': '__PLACEHOLDER_AUTO_0__',
-            '?': '__PLACEHOLDER_AUTO_1__',
-        }
-
-        for placeholder, marker in placeholder_patterns.items():
-            temp_sql = temp_sql.replace(placeholder, marker)
-            placeholder_mapping[marker] = placeholder
-            logger.debug(f"Auto-replaced placeholder {placeholder} with marker {marker}")
+                placeholder_mapping[marker.strip("'")] = placeholder
+                logger.debug(f"Auto-replaced placeholder {placeholder} with marker {marker}")
 
         temp_sql = temp_sql.strip()
 
-        # Remove comments if not preserving them
-        if not config.preserve_comments:
-            temp_sql = re.sub(r'--.*', '', temp_sql)
-            temp_sql = re.sub(r'/\*[\s\S]*?\*/', '', temp_sql)
-            logger.debug("Comments removed from SQL.")
-
         # Prevent multiple statements
-        if ';' in temp_sql.strip().rstrip(';'):
+        statements = parse(temp_sql, read=dialect)
+        if len(statements) > 1:
             raise SQLFormattingError("Multiple SQL statements are not supported.")
 
         # Parse SQL
-        parsed = parse_one(temp_sql, read=dialect)
+        parsed = statements[0]
 
         # Generate formatted SQL with uppercase keywords and proper quoting
         formatted_sql = parsed.sql(
@@ -133,14 +119,17 @@ def format_sql_code(
         )
 
         # Condense to single line if necessary
-        if force_single_line or (config.single_line_threshold and len(formatted_sql.replace('\n', ' ')) <= config.single_line_threshold):
+        if force_single_line or (
+            config.single_line_threshold
+            and len(formatted_sql.replace('\n', ' ')) <= config.single_line_threshold
+        ):
             formatted_sql = " ".join(formatted_sql.split())
 
         # Restore placeholders
         if placeholder_mapping:
             for marker, original_placeholder in placeholder_mapping.items():
-                formatted_sql = formatted_sql.replace(marker, original_placeholder)
-                logger.debug(f"Restored marker {marker} to placeholder {original_placeholder}")
+                formatted_sql = formatted_sql.replace(f"'{marker}'", original_placeholder)
+                logger.debug(f"Restored marker '{marker}' to placeholder {original_placeholder}")
 
         # Logging
         logger.debug(f"Original SQL:\n{sql_code}")
@@ -149,9 +138,11 @@ def format_sql_code(
         return formatted_sql
 
     except errors.ParseError as e:
-        raise SQLFormattingError(f"Failed to parse SQL code: {e}") from e
+        logger.warning(f"SQL parsing failed: {e}. Returning original SQL code.")
+        return sql_code  # Return the original SQL code unmodified
     except TokenError as te:
-        raise SQLFormattingError(f"Tokenization failed: {te}") from te
+        logger.warning(f"Tokenization failed: {te}. Returning original SQL code.")
+        return sql_code  # Return the original SQL code unmodified
     except Exception as e:
         raise SQLFormattingError(f"Unexpected error during SQL formatting: {e}") from e
 
@@ -197,18 +188,15 @@ class SQLStringFormatter(ast.NodeTransformer):
         """Extracts parts of an f-string, preserving expressions."""
         sql_parts = []
         placeholders = {}
-        current_pos = 0
 
         for value in node.values:
             if isinstance(value, ast.Constant):
                 sql_parts.append(value.value)
-                current_pos += len(value.value)
             elif isinstance(value, ast.FormattedValue):
-                expr = ast.unparse(value.value).strip()  # Using ast.unparse instead of astor.to_source
-                placeholder = f"__EXPR_PLACEHOLDER_{expr}__"
+                expr = ast.unparse(value.value).strip()
+                placeholder = f"__EXPR_PLACEHOLDER_{uuid.uuid4()}__"
                 sql_parts.append(placeholder)
-                placeholders[placeholder] = expr
-                current_pos += len(placeholder)
+                placeholders[placeholder] = f"{{{expr}}}"
 
         return "".join(sql_parts), placeholders
 
@@ -228,16 +216,7 @@ class SQLStringFormatter(ast.NodeTransformer):
                 )
                 if formatted_sql != node.value:
                     self.changed = True
-                    # Check if the string is multi-line
-                    if "\n" in formatted_sql:
-                        # Reconstruct the multi-line string with newlines after opening and before closing quotes
-                        reconstructed_str = f'"""\n{formatted_sql}\n"""'
-                        formatted_node = ast.parse(reconstructed_str).body[0].value
-                    else:
-                        # Single-line string
-                        reconstructed_str = f'"""{formatted_sql}"""'
-                        formatted_node = ast.parse(reconstructed_str).body[0].value
-                    return formatted_node
+                    return ast.Constant(value=formatted_sql)
 
             elif isinstance(node, ast.JoinedStr):
                 sql_str, placeholders = self.extract_fstring_parts(node)
@@ -252,25 +231,47 @@ class SQLStringFormatter(ast.NodeTransformer):
                 )
                 if formatted_sql != sql_str:
                     self.changed = True
-                    # Reconstruct the f-string with newlines after opening and before closing quotes
-                    if "\n" in formatted_sql:
-                        reconstructed_fstring = f'f"""\n{formatted_sql}\n"""'
-                    else:
-                        reconstructed_fstring = f'f"""{formatted_sql}"""'
-                    formatted_node = ast.parse(reconstructed_fstring).body[0].value
-                    return formatted_node
+                    # Reconstruct the f-string
+                    new_values = []
+                    pattern = re.compile('|'.join(re.escape(k) for k in placeholders.keys()))
+                    idx = 0
+                    while idx < len(formatted_sql):
+                        match = pattern.search(formatted_sql, idx)
+                        if match:
+                            if match.start() > idx:
+                                new_values.append(ast.Constant(value=formatted_sql[idx:match.start()]))
+                            expr_placeholder = match.group()
+                            expr_str = placeholders[expr_placeholder]
+                            expr_ast = ast.parse(expr_str).body[0].value
+                            new_values.append(ast.FormattedValue(
+                                value=expr_ast,
+                                conversion=-1,
+                                format_spec=None
+                            ))
+                            idx = match.end()
+                        else:
+                            new_values.append(ast.Constant(value=formatted_sql[idx:]))
+                            break
+                    return ast.JoinedStr(values=new_values)
             return None
         except SQLFormattingError as e:
             self.logger.warning(f"SQL formatting skipped: {e}")
             return None
 
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        """Handles string constants."""
+        formatted_node = self.format_sql_node(node)
+        return formatted_node or node
+
+    def visit_JoinedStr(self, node: ast.JoinedStr) -> ast.AST:
+        """Handles f-strings."""
+        formatted_node = self.format_sql_node(node)
+        return formatted_node or node
+
     def visit_Assign(self, node: ast.Assign) -> ast.AST:
         """Handles assignments."""
-        if isinstance(node.value, (ast.Constant, ast.JoinedStr)):
-            formatted_node = self.format_sql_node(node.value)
-            if formatted_node:
-                node.value = formatted_node
-        return self.generic_visit(node)
+        self.generic_visit(node)
+        return node
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
         """Handles function calls."""
@@ -286,7 +287,8 @@ class SQLStringFormatter(ast.NodeTransformer):
                     formatted_node = self.format_sql_node(keyword.value)
                     if formatted_node:
                         keyword.value = formatted_node
-        return self.generic_visit(node)
+        self.generic_visit(node)
+        return node
 
     @staticmethod
     def get_full_func_name(node: ast.AST) -> str:
@@ -312,43 +314,44 @@ def process_notebook(
         changed = False
         failed = False  # Flag to track failures
 
-        for cell in nb.cells:
+        for idx, cell in enumerate(nb.cells):
             if cell.cell_type != "code":
                 continue
 
             original_source = cell.source
-            formatted_source = original_source
 
-            # Identify and format SQL within function calls or magic commands
-            for func in config.function_names:
-                pattern = rf'{func}\s*\("""(.*?)"""'
-                matches = re.findall(pattern, formatted_source, re.DOTALL | re.IGNORECASE)
-                for match in matches:
-                    try:
-                        formatted_sql = format_sql_code(match, dialect, config)
-                        # Replace the SQL string within the function call
-                        formatted_source = formatted_source.replace(match, formatted_sql)
-                        changed = True
-                    except SQLFormattingError as e:
-                        logger.warning(f"Failed to parse cell:\n{match}\nError: {e}")
-                        failed = True  # Mark as failed
-
-            # Handle SQL magic commands (e.g., %%sql)
-            magic_pattern = r'%%sql\s*\n(.*)'
-            magic_matches = re.findall(magic_pattern, formatted_source, re.DOTALL | re.IGNORECASE)
-            for magic_sql in magic_matches:
+            # Handle magic SQL cells
+            if cell.source.lstrip().startswith("%%sql"):
+                stripped_source = cell.source.lstrip()
+                lines = stripped_source.split('\n', 1)
+                magic_command = lines[0]
+                sql_code = lines[1] if len(lines) > 1 else ''
                 try:
-                    formatted_sql_magic = format_sql_code(magic_sql.strip(), dialect, config)
-                    # Replace the SQL string within the magic command
-                    formatted_source = formatted_source.replace(magic_sql, formatted_sql_magic)
-                    changed = True
+                    formatted_sql = format_sql_code(
+                        sql_code, dialect, config, ignore_placeholders=True
+                    )
+                    cell.source = f"{magic_command}\n{formatted_sql}"
+                    if cell.source != original_source:
+                        changed = True
                 except SQLFormattingError as e:
-                    logger.warning(f"Failed to parse magic cell:\n{magic_sql}\nError: {e}")
-                    failed = True  # Mark as failed
+                    logger.warning(f"Failed to format magic SQL in cell {idx}: {e}")
+                    failed = True
+                continue
 
-            # Update cell source if changes were made
-            if formatted_source != original_source:
-                cell.source = formatted_source
+            # Process regular code cells
+            try:
+                tree = ast.parse(cell.source)
+                formatter = SQLStringFormatter(config, dialect, logger)
+                new_tree = formatter.visit(tree)
+                if formatter.changed:
+                    cell.source = ast.unparse(new_tree)
+                    changed = True
+            except SyntaxError as e:
+                logger.warning(f"Syntax error in cell {idx}: {e}")
+                failed = True
+            except Exception as e:
+                logger.error(f"Error processing cell {idx}: {e}")
+                failed = True
 
         if changed and not failed:
             nbformat.write(nb, notebook_path)
@@ -392,14 +395,15 @@ def main():
 
     try:
         config = load_config(args.config)
-        changed = False
+        all_succeeded = True
 
         for notebook in args.notebooks:
-            if process_notebook(notebook, config, args.dialect, logger):
-                changed = True
+            success = process_notebook(notebook, config, args.dialect, logger)
+            if not success:
+                all_succeeded = False
 
-        sys.exit(1 if changed else 0)
+        sys.exit(0 if all_succeeded else 1)
 
     except Exception as e:
         logger.error(f"Fatal error: {e}")
-        sys.exit(2)
+        sys.exit(1)
