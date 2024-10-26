@@ -36,10 +36,12 @@ jobs:
           enable-cache: true
       - name: Install Python 3.12
         run: uv python install 3.12
-      - name: Sync and Install Dependencies
-        run: uv sync --all-extras
       - name: Install Twine
         run: uv add twine
+      - name: Sync and Install Dependencies
+        run: uv sync --all-extras
+      - name: Verify Twine Installation
+        run: uv run twine --version
       - name: Build and Publish to PyPI
         env:
           TWINE_USERNAME: __token__
