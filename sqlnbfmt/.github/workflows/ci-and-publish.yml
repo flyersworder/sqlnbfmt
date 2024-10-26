@@ -1,0 +1,47 @@
+name: Python CI and Publish to PyPI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  release:
+    types: [created]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+      - name: Install Python 3.12
+        run: uv python install 3.12
+      - name: Sync and Install Dependencies
+        run: uv sync --all-extras --dev
+      - name: Run Tests
+        run: uv run pytest
+
+  publish:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Install Python 3.12
+        run: uv python install 3.12
+      - name: Sync and Install Dependencies
+        run: uv sync --all-extras
+      - name: Build and Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          uv build --no-sources
+          uv run twine upload dist/*
