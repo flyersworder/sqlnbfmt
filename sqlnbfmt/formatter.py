@@ -97,6 +97,19 @@ def format_sql_code(
                 placeholder_mapping[marker] = placeholder
                 logger.debug(f"Replaced placeholder {placeholder} with marker {marker}")
 
+        # Automatically replace common placeholders (%s and ?)
+        # with unique markers to prevent parsing errors
+        # Define regex patterns for placeholders
+        placeholder_patterns = {
+            '%s': '__PLACEHOLDER_AUTO_0__',
+            '?': '__PLACEHOLDER_AUTO_1__',
+        }
+
+        for placeholder, marker in placeholder_patterns.items():
+            temp_sql = temp_sql.replace(placeholder, marker)
+            placeholder_mapping[marker] = placeholder
+            logger.debug(f"Auto-replaced placeholder {placeholder} with marker {marker}")
+
         temp_sql = temp_sql.strip()
 
         # Remove comments if not preserving them
@@ -124,7 +137,7 @@ def format_sql_code(
             formatted_sql = " ".join(formatted_sql.split())
 
         # Restore placeholders
-        if placeholders:
+        if placeholder_mapping:
             for marker, original_placeholder in placeholder_mapping.items():
                 formatted_sql = formatted_sql.replace(marker, original_placeholder)
                 logger.debug(f"Restored marker {marker} to placeholder {original_placeholder}")

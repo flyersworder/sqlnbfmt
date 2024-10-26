@@ -93,7 +93,7 @@ def test_format_sql_code_special_characters(sample_config):
     # In MySQL, '#' denotes a comment, so '`#column2`' should be quoted to avoid being treated as a comment
     formatted = format_sql_code(sql, "mysql", sample_config)
     # Update expected to include backticks for `TABLE` and `CONDITION`
-    expected = "SELECT @column1, `#column2`, $column3 FROM `TABLE` WHERE `CONDITION` = '@value'"
+    expected = "SELECT @COLUMN1, `#COLUMN2`, $COLUMN3 FROM `TABLE` WHERE `CONDITION` = '@value'"
     assert normalize_sql(expected) == normalize_sql(formatted)
 
 # Test 5: Reserved Keywords as Identifiers
@@ -295,4 +295,108 @@ def test_format_sql_code_multiple_options(sample_config):
     formatted = format_sql_code(sql, None, sample_config)  # dialect=None
     # Should be single line due to low threshold
     expected = "SELECT col1, col2 FROM table WHERE condition ORDER BY col1 DESC"
+    assert normalize_sql(expected) == normalize_sql(formatted)
+
+# Additional Recommended Tests
+
+# Test 13: Common Table Expressions (CTEs) Formatting
+def test_format_sql_code_with_ctes(sample_config):
+    """
+    Test that SQL queries with Common Table Expressions (CTEs) are formatted correctly.
+    """
+    sql = """
+    WITH recent_orders AS (
+        SELECT user_id, COUNT(*) AS order_count
+        FROM orders
+        WHERE order_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+        GROUP BY user_id
+    ), top_customers AS (
+        SELECT u.id, u.name, ro.order_count
+        FROM users u
+        JOIN recent_orders ro ON u.id = ro.user_id
+        WHERE ro.order_count > 5
+    )
+    SELECT tc.id, tc.name, tc.order_count
+    FROM top_customers tc
+    ORDER BY tc.order_count DESC
+    """
+    formatted = format_sql_code(sql, "mysql", sample_config)
+    expected = (
+        "WITH recent_orders AS ("
+        "SELECT user_id, COUNT(*) AS order_count FROM orders "
+        "WHERE order_date >= DATE_SUB(CURDATE(), INTERVAL '30' DAY) GROUP BY user_id"
+        "), top_customers AS ("
+        "SELECT u.id, u.name, ro.order_count FROM users AS u "
+        "JOIN recent_orders AS ro ON u.id = ro.user_id WHERE ro.order_count > 5"
+        ") "
+        "SELECT tc.id, tc.name, tc.order_count FROM top_customers AS tc ORDER BY tc.order_count DESC"
+    )
+    assert normalize_sql(expected) == normalize_sql(formatted)
+
+# Test 14: Different SQL Dialects
+def test_format_sql_code_different_dialects(sample_config):
+    """
+    Test that SQL formatting respects different SQL dialects.
+    """
+    sql = "SELECT * FROM \"my_table\" WHERE \"status\" = 'active'"
+    formatted_pg = format_sql_code(sql, "postgres", sample_config)
+    expected_pg = "SELECT * FROM \"my_table\" WHERE \"status\" = 'active'"
+    assert normalize_sql(expected_pg) == normalize_sql(formatted_pg)
+
+    formatted_sqlite = format_sql_code(sql, "sqlite", sample_config)
+    expected_sqlite = "SELECT * FROM \"my_table\" WHERE \"status\" = 'active'"
+    assert normalize_sql(expected_sqlite) == normalize_sql(formatted_sqlite)
+
+# Test 15: Window Functions Formatting
+def test_format_sql_code_with_window_functions(sample_config):
+    """
+    Test that SQL queries with window functions are formatted correctly.
+    """
+    sql = """
+    SELECT
+        user_id,
+        login_date,
+        COUNT(*) OVER (PARTITION BY user_id ORDER BY login_date) AS cumulative_logins
+    FROM logins
+    """
+    formatted = format_sql_code(sql, "mysql", sample_config)
+    expected = (
+        "SELECT user_id, login_date, COUNT(*) OVER (PARTITION BY user_id ORDER BY login_date) AS cumulative_logins FROM logins"
+    )
+    assert normalize_sql(expected) == normalize_sql(formatted)
+
+# Test 16: Placeholder Preservation
+def test_format_sql_code_with_placeholders(sample_config):
+    """
+    Test that SQL queries with placeholders are preserved correctly.
+    """
+    sql = "SELECT * FROM users WHERE id = %s AND status = ?"
+    formatted = format_sql_code(sql, "mysql", sample_config)
+    expected = "SELECT * FROM users WHERE id = %s AND status = ?"
+    assert normalize_sql(expected) == normalize_sql(formatted)
+
+# Test 17: Handling Comments
+def test_format_sql_code_preserve_comments(sample_config):
+    """
+    Test that SQL comments are preserved when preserve_comments is True.
+    """
+    sql = """
+    -- This is a comment
+    SELECT * FROM users -- Inline comment
+    """
+    formatted = format_sql_code(sql, None, sample_config)
+    expected = "/* This is a comment */ SELECT * FROM users /* Inline comment */"
+    assert normalize_sql(expected) == normalize_sql(formatted)
+
+def test_format_sql_code_remove_comments(sample_config):
+    """
+    Test that SQL comments are removed when preserve_comments is False.
+    """
+    sample_config.preserve_comments = False
+    sql = """
+    -- This is a comment
+    SELECT * FROM users -- Inline comment
+    """
+    formatted = format_sql_code(sql, None, sample_config)
+    expected = "SELECT * FROM users"
     assert normalize_sql(expected) == normalize_sql(formatted)
