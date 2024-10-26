@@ -38,6 +38,8 @@ jobs:
         run: uv python install 3.12
       - name: Sync and Install Dependencies
         run: uv sync --all-extras
+      - name: Install Twine
+        run: uv pip install twine
       - name: Build and Publish to PyPI
         env:
           TWINE_USERNAME: __token__
