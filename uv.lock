@@ -292,7 +292,7 @@ wheels = [
 
 [[package]]
 name = "sqlnbfmt"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "astor" },
@@ -301,7 +301,7 @@ dependencies = [
     { name = "sqlglot" },
 ]
 
-[package.dev-dependencies]
+[package.dependency-groups]
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -315,7 +315,7 @@ requires-dist = [
     { name = "sqlglot", specifier = ">=25.27.0" },
 ]
 
-[package.metadata.requires-dev]
+[package.metadata.dependency-groups]
 dev = [
     { name = "pytest", specifier = ">=8.3.3" },
     { name = "pytest-cov", specifier = ">=5.0.0" },
