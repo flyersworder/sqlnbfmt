@@ -456,7 +456,7 @@ def process_notebook(
         return changed
 
     except Exception as e:
-        logger.error(f"Failed to process notebook {notebook_path}: {e}")
+        logger.error(f"Failed to process notebook {notebook_path}: {e}", exc_info=True)
         raise
 
 
