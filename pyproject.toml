@@ -8,6 +8,10 @@ authors = [
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12"
+]
 dependencies = [
     "astor>=0.8.1",
     "nbformat>=5.10.4",
