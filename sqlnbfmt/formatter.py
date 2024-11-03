@@ -206,6 +206,10 @@ class SQLStringFormatter(ast.NodeTransformer):
         placeholders = {}
         placeholder_counter = 0
 
+        # Handle empty f-strings or f-strings with only constants
+        if all(isinstance(value, ast.Constant) for value in node.values):
+            return "".join(value.value for value in node.values), {}
+
         for value in node.values:
             if isinstance(value, ast.Constant):
                 sql_parts.append(value.value)
@@ -236,10 +240,8 @@ class SQLStringFormatter(ast.NodeTransformer):
                     self.changed = True
                     # Reconstruct the string with adjusted triple quotes
                     if '\n' in formatted_sql:
-                        # Multi-line string: place triple quotes on their own lines
                         formatted_str = f'"""\n{formatted_sql}\n"""'
                     else:
-                        # Single-line string
                         formatted_str = f'"""{formatted_sql}"""'
                     # Parse the formatted string back into an AST node
                     formatted_node = ast.parse(formatted_str).body[0].value
@@ -247,19 +249,24 @@ class SQLStringFormatter(ast.NodeTransformer):
 
             elif isinstance(node, ast.JoinedStr):
                 sql_str, placeholders = self.extract_fstring_parts(node)
-                if not self.is_likely_sql(sql_str):
+                if not sql_str or not self.is_likely_sql(sql_str):
                     return None
 
-                formatted_sql = format_sql_code(
-                    sql_str,
-                    self.dialect,
-                    self.config,
-                    placeholders=placeholders,
-                    force_single_line=force_single_line,
-                )
+                try:
+                    formatted_sql = format_sql_code(
+                        sql_str,
+                        self.dialect,
+                        self.config,
+                        placeholders=placeholders,
+                        force_single_line=force_single_line,
+                    )
+                except SQLFormattingError:
+                    return None
 
                 if placeholders:
                     for placeholder in placeholders.keys():
+                        if not placeholder:  # Skip empty placeholders
+                            continue
                         # Remove quotes around placeholders in formatted SQL
                         formatted_sql = formatted_sql.replace(f"'{placeholder}'", placeholder)
                         formatted_sql = formatted_sql.replace(f'"{placeholder}"', placeholder)
@@ -268,31 +275,36 @@ class SQLStringFormatter(ast.NodeTransformer):
                     self.changed = True
                     # Reconstruct the f-string
                     new_values = []
-                    pattern = re.compile('|'.join(re.escape(k) for k in placeholders.keys()))
-                    idx = 0
-                    while idx < len(formatted_sql):
-                        match = pattern.search(formatted_sql, idx)
-                        if match:
-                            if match.start() > idx:
-                                # Add preceding text as Constant
-                                new_values.append(ast.Constant(value=formatted_sql[idx:match.start()]))
-                            placeholder = match.group()
-                            expr_str = placeholders[placeholder].strip()
-                            try:
-                                expr_ast = ast.parse(expr_str, mode='eval').body
-                            except SyntaxError as e:
-                                self.logger.warning(f"Failed to parse expression '{expr_str}': {e}")
-                                return None
-                            new_values.append(ast.FormattedValue(
-                                value=expr_ast,
-                                conversion=-1,
-                                format_spec=None
-                            ))
-                            idx = match.end()
-                        else:
-                            # Add the rest of the string as Constant
-                            new_values.append(ast.Constant(value=formatted_sql[idx:]))
-                            break
+                    if not placeholders:
+                        # If no placeholders, just create a simple f-string
+                        new_values.append(ast.Constant(value=formatted_sql))
+                    else:
+                        pattern = re.compile('|'.join(re.escape(k) for k in placeholders.keys() if k))
+                        idx = 0
+                        while idx < len(formatted_sql):
+                            match = pattern.search(formatted_sql, idx)
+                            if match:
+                                if match.start() > idx:
+                                    # Add preceding text as Constant
+                                    new_values.append(ast.Constant(value=formatted_sql[idx:match.start()]))
+                                placeholder = match.group()
+                                expr_str = placeholders[placeholder].strip()
+                                try:
+                                    expr_ast = ast.parse(expr_str, mode='eval').body
+                                except SyntaxError as e:
+                                    self.logger.warning(f"Failed to parse expression '{expr_str}': {e}")
+                                    return None
+                                new_values.append(ast.FormattedValue(
+                                    value=expr_ast,
+                                    conversion=-1,
+                                    format_spec=None
+                                ))
+                                idx = match.end()
+                            else:
+                                # Add the rest of the string as Constant
+                                new_values.append(ast.Constant(value=formatted_sql[idx:]))
+                                break
+
                     new_node = ast.JoinedStr(values=new_values)
                     # Wrap the f-string with adjusted triple quotes
                     if '\n' in formatted_sql:
@@ -309,6 +321,9 @@ class SQLStringFormatter(ast.NodeTransformer):
             return None
         except SQLFormattingError as e:
             self.logger.warning(f"SQL formatting skipped: {e}")
+            return None
+        except Exception as e:
+            self.logger.warning(f"Unexpected error during SQL formatting: {e}")
             return None
 
     def visit_Assign(self, node: ast.Assign) -> ast.AST:
