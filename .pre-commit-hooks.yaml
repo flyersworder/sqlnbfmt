@@ -1,0 +1,9 @@
+- id: sqlnbfmt
+  name: SQL Notebook Formatter
+  description: Format SQL queries in Jupyter notebooks
+  entry: sqlnbfmt
+  language: python
+  types: [jupyter]
+  require_serial: true
+  minimum_pre_commit_version: '2.9.0'
+  additional_dependencies: []

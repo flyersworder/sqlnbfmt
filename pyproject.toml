@@ -1,6 +1,6 @@
 [project]
 name = "sqlnbfmt"
-version = "0.1.3"
+version = "0.1.4"
 description = "A tool to format SQL code in Jupyter notebooks."
 authors = [
   { name = "Qing", email = "qingye779@gmail.com" }
@@ -36,3 +36,6 @@ sqlnbfmt = "sqlnbfmt.formatter:main"
 markers = [
     "integration: mark a test as an integration test."
 ]
+
+[tool.setuptools.package-data]
+sqlnbfmt = [".pre-commit-hooks.yaml"]
