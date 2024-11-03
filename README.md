@@ -50,8 +50,6 @@ repos:
     hooks:
       - id: sqlnbfmt
         name: sqlnbfmt
-        entry: sqlnbfmt
-        language: system
         types: [jupyter]
         args: [--config, config.yaml, --dialect, postgres]
 ```
