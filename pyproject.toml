@@ -1,6 +1,6 @@
 [project]
 name = "sqlnbfmt"
-version = "0.1.2"
+version = "0.1.3"
 description = "A tool to format SQL code in Jupyter notebooks."
 authors = [
   { name = "Qing", email = "qingye779@gmail.com" }
