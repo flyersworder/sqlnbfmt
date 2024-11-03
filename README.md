@@ -45,14 +45,15 @@ pip install pre-commit
 2. Add to `.pre-commit-config.yaml`:
 ```yaml
 repos:
-  - repo: local
+  - repo: https://github.com/flyersworder/sqlnbfmt
+    rev: v0.1.1
     hooks:
       - id: sqlnbfmt
         name: sqlnbfmt
         entry: sqlnbfmt
         language: system
         types: [jupyter]
-        args: [--config, config.yaml, --dialect, mysql]
+        args: [--config, config.yaml, --dialect, postgres]
 ```
 Please fun the following command in your CMD for help:
 
