@@ -502,16 +502,26 @@ def main():
     try:
         config = load_config(args.config)
         changed = False
+        changed_files = []
 
         for notebook in args.notebooks:
             if process_notebook(notebook, config, args.dialect, logger):
                 changed = True
+                changed_files.append(notebook)
 
-        sys.exit(0 if changed else 1)
+        # Print summary
+        if changed:
+            logger.info("Changes made to the following notebooks:")
+            for file in changed_files:
+                logger.info(f"  - {file}")
+        else:
+            logger.info("No changes needed. All notebooks are properly formatted.")
+
+        sys.exit(0)
 
     except Exception as e:
         logger.error(f"Fatal error: {e}")
-        sys.exit(2)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
