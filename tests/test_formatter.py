@@ -114,6 +114,28 @@ WHERE
         [nbf.new_code_cell('''message = "This is not an SQL query: select * from users;"''')],
         [nbf.new_code_cell('''message = "This is not an SQL query: select * from users;"''')],
     ),
+    # Test Case 11: F-string without variables
+    (
+        [nbf.new_code_cell('''query = f"select id, name from users where active = 1"''')],
+        [nbf.new_code_cell('''query = f"""
+SELECT
+  id,
+  name
+FROM users
+WHERE
+  active = 1
+"""''')],
+    ),
+    # Test Case 12: F-string with only string constants
+    (
+        [nbf.new_code_cell('''query = f"select " f"id, name " f"from users"''')],
+        [nbf.new_code_cell('''query = f"""
+SELECT
+  id,
+  name
+FROM users
+"""''')],
+    ),
 ])
 def test_sql_formatter(temp_nb_path, logger, input_cells, expected_cells):
     # Create a new notebook
