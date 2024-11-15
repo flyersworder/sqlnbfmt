@@ -223,27 +223,41 @@ class SQLStringFormatter(ast.NodeTransformer):
         return "".join(sql_parts), placeholders
 
     def format_sql_node(
-        self, node: Union[ast.Constant, ast.JoinedStr], force_single_line: bool = False
+        self, 
+        node: Union[ast.Constant, ast.JoinedStr], 
+        force_single_line: bool = False,
+        in_function: bool = False
     ) -> Optional[ast.AST]:
         """Formats SQL code in AST nodes."""
         try:
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if not self.is_likely_sql(node.value):
                     return None
+
                 formatted_sql = format_sql_code(
                     node.value,
                     self.dialect,
                     self.config,
                     force_single_line=force_single_line,
                 )
+
                 if formatted_sql != node.value:
                     self.changed = True
-                    # Reconstruct the string with adjusted triple quotes
+                    if in_function and '\n' in formatted_sql:
+                        # Apply Black-style indentation for function arguments
+                        lines = formatted_sql.split('\n')
+                        indented_lines = [lines[0]] + [
+                            " " * 4 + line if line.strip() else line
+                            for line in lines[1:-1]
+                        ] + [" " * 4 + lines[-1] if lines[-1].strip() else lines[-1]]
+                        formatted_sql = '\n'.join(indented_lines)
+                    
+                    # Reconstruct the string with appropriate quotes
                     if '\n' in formatted_sql:
                         formatted_str = f'"""\n{formatted_sql}\n"""'
                     else:
                         formatted_str = f'"""{formatted_sql}"""'
-                    # Parse the formatted string back into an AST node
+                    
                     formatted_node = ast.parse(formatted_str).body[0].value
                     return formatted_node
 
@@ -273,10 +287,18 @@ class SQLStringFormatter(ast.NodeTransformer):
 
                 if formatted_sql != sql_str:
                     self.changed = True
+                    # Apply Black-style indentation for function arguments
+                    if in_function and '\n' in formatted_sql:
+                        lines = formatted_sql.split('\n')
+                        indented_lines = [lines[0]] + [
+                            " " * 4 + line if line.strip() else line
+                            for line in lines[1:-1]
+                        ] + [" " * 4 + lines[-1] if lines[-1].strip() else lines[-1]]
+                        formatted_sql = '\n'.join(indented_lines)
+
                     # Reconstruct the f-string
                     new_values = []
                     if not placeholders:
-                        # If no placeholders, just create a simple f-string
                         new_values.append(ast.Constant(value=formatted_sql))
                     else:
                         pattern = re.compile('|'.join(re.escape(k) for k in placeholders.keys() if k))
@@ -340,12 +362,13 @@ class SQLStringFormatter(ast.NodeTransformer):
         if any(name in func_name for name in self.config.function_names):
             for idx, arg in enumerate(node.args):
                 if isinstance(arg, (ast.Constant, ast.JoinedStr)):
-                    formatted_node = self.format_sql_node(arg)
+                    # Format with Black-style indentation for function arguments
+                    formatted_node = self.format_sql_node(arg, in_function=True)
                     if formatted_node:
                         node.args[idx] = formatted_node
             for keyword in node.keywords:
                 if isinstance(keyword.value, (ast.Constant, ast.JoinedStr)):
-                    formatted_node = self.format_sql_node(keyword.value)
+                    formatted_node = self.format_sql_node(keyword.value, in_function=True)
                     if formatted_node:
                         keyword.value = formatted_node
         return self.generic_visit(node)
