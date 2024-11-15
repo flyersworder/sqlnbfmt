@@ -246,14 +246,14 @@ class SQLStringFormatter(ast.NodeTransformer):
                     if in_function and '\n' in formatted_sql:
                         # Apply Black-style indentation for function arguments
                         lines = formatted_sql.split('\n')
-                        indented_lines = [lines[0]] + [
+                        # Indent all lines including the first SQL line
+                        indented_lines = [
                             " " * 4 + line if line.strip() else line
-                            for line in lines[1:-1]
-                        ] + [" " * 4 + lines[-1] if lines[-1].strip() else lines[-1]]
+                            for line in lines
+                        ]
                         formatted_sql = '\n'.join(indented_lines)
-                    
-                    # Reconstruct the string with appropriate quotes
-                    if '\n' in formatted_sql:
+                        
+                        # Reconstruct the string with appropriate quotes
                         formatted_str = f'"""\n{formatted_sql}\n"""'
                     else:
                         formatted_str = f'"""{formatted_sql}"""'
@@ -279,9 +279,8 @@ class SQLStringFormatter(ast.NodeTransformer):
 
                 if placeholders:
                     for placeholder in placeholders.keys():
-                        if not placeholder:  # Skip empty placeholders
+                        if not placeholder:
                             continue
-                        # Remove quotes around placeholders in formatted SQL
                         formatted_sql = formatted_sql.replace(f"'{placeholder}'", placeholder)
                         formatted_sql = formatted_sql.replace(f'"{placeholder}"', placeholder)
 
@@ -290,10 +289,11 @@ class SQLStringFormatter(ast.NodeTransformer):
                     # Apply Black-style indentation for function arguments
                     if in_function and '\n' in formatted_sql:
                         lines = formatted_sql.split('\n')
-                        indented_lines = [lines[0]] + [
+                        # Indent all lines including the first SQL line
+                        indented_lines = [
                             " " * 4 + line if line.strip() else line
-                            for line in lines[1:-1]
-                        ] + [" " * 4 + lines[-1] if lines[-1].strip() else lines[-1]]
+                            for line in lines
+                        ]
                         formatted_sql = '\n'.join(indented_lines)
 
                     # Reconstruct the f-string
@@ -307,7 +307,6 @@ class SQLStringFormatter(ast.NodeTransformer):
                             match = pattern.search(formatted_sql, idx)
                             if match:
                                 if match.start() > idx:
-                                    # Add preceding text as Constant
                                     new_values.append(ast.Constant(value=formatted_sql[idx:match.start()]))
                                 placeholder = match.group()
                                 expr_str = placeholders[placeholder].strip()
@@ -323,23 +322,20 @@ class SQLStringFormatter(ast.NodeTransformer):
                                 ))
                                 idx = match.end()
                             else:
-                                # Add the rest of the string as Constant
                                 new_values.append(ast.Constant(value=formatted_sql[idx:]))
                                 break
 
                     new_node = ast.JoinedStr(values=new_values)
-                    # Wrap the f-string with adjusted triple quotes
                     if '\n' in formatted_sql:
-                        # Multi-line f-string
                         formatted_fstring = ast.JoinedStr(values=[
                             ast.Constant(value='\n'),
                             *new_node.values,
                             ast.Constant(value='\n')
                         ])
                     else:
-                        # Single-line f-string
                         formatted_fstring = new_node
                     return formatted_fstring
+
             return None
         except SQLFormattingError as e:
             self.logger.warning(f"SQL formatting skipped: {e}")
