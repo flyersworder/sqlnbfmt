@@ -256,7 +256,8 @@ class SQLStringFormatter(ast.NodeTransformer):
                         # Reconstruct the string with appropriate quotes
                         formatted_str = f'"""\n{formatted_sql}\n"""'
                     else:
-                        formatted_str = f'"""{formatted_sql}"""'
+                        # Ensure newlines are added around the formatted SQL
+                        formatted_str = f'"""\n{formatted_sql}\n"""'
                     
                     formatted_node = ast.parse(formatted_str).body[0].value
                     return formatted_node
