@@ -328,11 +328,18 @@ class SQLStringFormatter(ast.NodeTransformer):
 
                     new_node = ast.JoinedStr(values=new_values)
                     if '\n' in formatted_sql:
-                        formatted_fstring = ast.JoinedStr(values=[
-                            ast.Constant(value='\n'),
-                            *new_node.values,
-                            ast.Constant(value=f'\n{" " * 4}')
-                        ])
+                        if in_function:
+                            formatted_fstring = ast.JoinedStr(values=[
+                                ast.Constant(value='\n'),
+                                *new_node.values,
+                                ast.Constant(value=f'\n{" " * 4}')
+                            ])
+                        else:
+                            formatted_fstring = ast.JoinedStr(values=[
+                                ast.Constant(value='\n'),
+                                *new_node.values,
+                                ast.Constant(value='\n')
+                            ])
                     else:
                         formatted_fstring = new_node
                     return formatted_fstring
