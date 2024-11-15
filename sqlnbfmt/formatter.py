@@ -254,7 +254,7 @@ class SQLStringFormatter(ast.NodeTransformer):
                         formatted_sql = '\n'.join(indented_lines)
                         
                         # Reconstruct the string with appropriate quotes
-                        formatted_str = f'"""\n{formatted_sql}\n"""'
+                        formatted_str = f'"""\n{formatted_sql}\n{" " * 4}"""'
                     else:
                         # Ensure newlines are added around the formatted SQL
                         formatted_str = f'"""\n{formatted_sql}\n"""'
@@ -331,7 +331,7 @@ class SQLStringFormatter(ast.NodeTransformer):
                         formatted_fstring = ast.JoinedStr(values=[
                             ast.Constant(value='\n'),
                             *new_node.values,
-                            ast.Constant(value='\n')
+                            ast.Constant(value=f'\n{" " * 4}')
                         ])
                     else:
                         formatted_fstring = new_node
