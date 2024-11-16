@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Set, Optional, Dict, Union, Tuple
 
 import astor
+import black
 import nbformat
 import yaml
 from sqlglot import parse_one, errors
@@ -484,6 +485,9 @@ def process_notebook(
                 if formatter.changed:
                     # Use astor to convert AST back to source code
                     formatted_code = astor.to_source(new_tree)
+                    # Now format with black
+                    formatted_code = black.format_str(formatted_code, mode=black.FileMode())
+                    
                     if formatted_code != original_code:
                         cell.source = formatted_code
                         changed = True

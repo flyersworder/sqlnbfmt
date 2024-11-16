@@ -45,7 +45,8 @@ WHERE
     # Test Case 2: SELECT Query with F-String and Variable
     (
         [nbf.new_code_cell('''table_name = "users"\nquery = f"select * from {table_name}"''')],
-        [nbf.new_code_cell('''table_name = 'users'\nquery = f"""
+        [nbf.new_code_cell('''table_name = "users"
+query = f"""
 SELECT
   *
 FROM {table_name}
@@ -54,7 +55,8 @@ FROM {table_name}
     # Test Case 3: Multi-line SELECT Query with Variables
     (
         [nbf.new_code_cell('''columns = "id, name"\nquery = f"select {columns} from users where active = 1"''')],
-        [nbf.new_code_cell('''columns = 'id, name'\nquery = f"""
+        [nbf.new_code_cell('''columns = "id, name"
+query = f"""
 SELECT
   {columns}
 FROM users
@@ -70,18 +72,26 @@ WHERE
     # Test Case 5: SQL Query with Cell Magic Command
     (
         [nbf.new_code_cell('''%%sql\nselect * from users where active = 1''')],
-        [nbf.new_code_cell('''%%sql\nSELECT\n  *\nFROM users\nWHERE\n  active = 1''')],
+        [nbf.new_code_cell('''%%sql
+SELECT
+  *
+FROM users
+WHERE
+  active = 1''')],
     ),
-    # Test Case 6: INSERT Query with Variables (Updated to handle formatter limitations)
+    # Test Case 6: INSERT Query with Variables (Remains Unchanged)
     (
         [nbf.new_code_cell('''table_name = "users"\ncolumns = "(id, name)"\nvalues = "(1, 'Alice')"\nquery = f"insert into {table_name} {columns} values {values}"''')],
-        # Since the formatter cannot handle placeholders here, we expect the original code to remain unchanged
-        [nbf.new_code_cell('''table_name = "users"\ncolumns = "(id, name)"\nvalues = "(1, 'Alice')"\nquery = f"insert into {table_name} {columns} values {values}"''')],
+        [nbf.new_code_cell('''table_name = "users"
+columns = "(id, name)"
+values = "(1, 'Alice')"
+query = f"insert into {table_name} {columns} values {values}"''')],
     ),
     # Test Case 7: UPDATE Query with Variables
     (
         [nbf.new_code_cell('''table_name = "users"\nquery = f"update {table_name} set active = 0 where id = 1"''')],
-        [nbf.new_code_cell('''table_name = 'users'\nquery = f"""
+        [nbf.new_code_cell('''table_name = "users"
+query = f"""
 UPDATE {table_name} SET active = 0
 WHERE
   id = 1
@@ -135,6 +145,32 @@ SELECT
   name
 FROM users
 """''')],
+    ),
+    # Test Case 13: In-function SQL Query
+    (
+        [nbf.new_code_cell('''pd.read_sql("""select id, name from users where active = 1""")''')],
+        [nbf.new_code_cell('''pd.read_sql(
+    """
+    SELECT
+      id,
+      name
+    FROM users
+    WHERE
+      active = 1
+    """
+)''')],
+    ),
+    # Test Case 14: In-function SQL Query with F-String
+    (
+        [nbf.new_code_cell('''table_name = "users"\npd.read_sql(f"select * from {table_name}")''')],
+        [nbf.new_code_cell('''table_name = "users"
+pd.read_sql(
+    f"""
+    SELECT
+      *
+    FROM {table_name}
+    """
+)''')],
     ),
 ])
 def test_sql_formatter(temp_nb_path, logger, input_cells, expected_cells):
