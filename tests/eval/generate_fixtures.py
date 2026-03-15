@@ -23,7 +23,6 @@ from nbformat import v4 as nbf  # noqa: E402
 from sqlnbfmt.formatter import load_config, process_notebook, setup_logging  # noqa: E402
 
 EVAL_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 DIALECT = "mysql"
 
 
@@ -224,6 +223,20 @@ def non_sql_unchanged():
     return nb
 
 
+def skip_hint():
+    """Cell with # sqlnbfmt: skip — must remain untouched."""
+    nb = nbf.new_notebook()
+    nb.cells = [
+        nbf.new_code_cell(
+            '# sqlnbfmt: skip\nquery = "select id, name from users where active = 1"'
+        ),
+        nbf.new_code_cell(
+            'query = "select id, name from users where active = 1"'
+        ),
+    ]
+    return nb
+
+
 # ---------------------------------------------------------------------------
 # Case registry
 # ---------------------------------------------------------------------------
@@ -246,12 +259,13 @@ CASES = {
     "in_function_sql": in_function_sql,
     "idempotency": idempotency,
     "non_sql_unchanged": non_sql_unchanged,
+    "skip_hint": skip_hint,
 }
 
 
 def generate_all():
     """Generate all fixture pairs."""
-    config = load_config(CONFIG_PATH)
+    config = load_config()
     logger = setup_logging("WARNING")
 
     for name, factory in CASES.items():

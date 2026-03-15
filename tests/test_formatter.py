@@ -3,7 +3,7 @@ import nbformat
 from nbformat import v4 as nbf
 import logging
 
-from sqlnbfmt.formatter import process_notebook, load_config
+from sqlnbfmt.formatter import process_notebook, load_config, diff_notebook
 
 
 # Fixture for temporary notebook path
@@ -216,7 +216,7 @@ def test_sql_formatter(temp_nb_path, logger, input_cells, expected_cells):
     nbformat.write(nb, temp_nb_path)
 
     # Load configuration
-    config = load_config("config.yaml")
+    config = load_config()
     dialect = "mysql"  # or your preferred SQL dialect
 
     # Run the formatter on the notebook
@@ -235,3 +235,102 @@ def test_sql_formatter(temp_nb_path, logger, input_cells, expected_cells):
 
     # Clean up
     temp_nb_path.unlink()
+
+
+def test_skip_hint(tmp_path, logger):
+    """Cell with # sqlnbfmt: skip should remain untouched."""
+    nb = nbf.new_notebook()
+    original_source = (
+        '# sqlnbfmt: skip\nquery = "select id, name from users where active = 1"'
+    )
+    nb.cells = [nbf.new_code_cell(original_source)]
+    nb_path = tmp_path / "skip_test.ipynb"
+    nbformat.write(nb, nb_path)
+
+    config = load_config()
+    changed = process_notebook(nb_path, config, "mysql", logger)
+    assert not changed
+
+    result_nb = nbformat.read(nb_path, as_version=4)
+    assert result_nb.cells[0].source == original_source
+
+
+def test_check_only_unformatted(tmp_path, logger):
+    """--check on unformatted notebook returns True but file unchanged."""
+    nb = nbf.new_notebook()
+    original_source = 'query = "select id, name from users where active = 1"'
+    nb.cells = [nbf.new_code_cell(original_source)]
+    nb_path = tmp_path / "check_test.ipynb"
+    nbformat.write(nb, nb_path)
+
+    config = load_config()
+    changed = process_notebook(nb_path, config, "mysql", logger, check_only=True)
+    assert changed
+
+    # File should be unchanged
+    result_nb = nbformat.read(nb_path, as_version=4)
+    assert result_nb.cells[0].source == original_source
+
+
+def test_check_only_formatted(tmp_path, logger):
+    """--check on already-formatted notebook returns False."""
+    nb = nbf.new_notebook()
+    nb.cells = [
+        nbf.new_code_cell(
+            'query = """\nSELECT\n  id,\n  name\nFROM users\nWHERE\n  active = 1\n"""'
+        )
+    ]
+    nb_path = tmp_path / "check_formatted.ipynb"
+    nbformat.write(nb, nb_path)
+
+    config = load_config()
+    changed = process_notebook(nb_path, config, "mysql", logger, check_only=True)
+    assert not changed
+
+
+def test_diff_notebook_unformatted(tmp_path, logger):
+    """diff_notebook returns non-empty diff for unformatted notebook."""
+    nb = nbf.new_notebook()
+    nb.cells = [
+        nbf.new_code_cell('query = "select id, name from users where active = 1"')
+    ]
+    nb_path = tmp_path / "diff_test.ipynb"
+    nbformat.write(nb, nb_path)
+
+    config = load_config()
+    diff_output = diff_notebook(nb_path, config, "mysql", logger)
+    assert diff_output  # non-empty
+    assert "---" in diff_output
+    assert "+++" in diff_output
+
+
+def test_diff_notebook_formatted(tmp_path, logger):
+    """diff_notebook returns empty string for already-formatted notebook."""
+    nb = nbf.new_notebook()
+    nb.cells = [
+        nbf.new_code_cell(
+            'query = """\nSELECT\n  id,\n  name\nFROM users\nWHERE\n  active = 1\n"""'
+        )
+    ]
+    nb_path = tmp_path / "diff_formatted.ipynb"
+    nbformat.write(nb, nb_path)
+
+    config = load_config()
+    diff_output = diff_notebook(nb_path, config, "mysql", logger)
+    assert diff_output == ""
+
+
+def test_load_config_defaults():
+    """load_config() without args returns defaults."""
+    config = load_config()
+    assert "SELECT" in config.sql_keywords
+    assert "read_sql" in config.function_names
+    assert config.indent_width == 4
+
+
+def test_load_config_missing_file():
+    """load_config with missing path raises FileNotFoundError."""
+    import pytest
+
+    with pytest.raises(FileNotFoundError):
+        load_config("/nonexistent/config.yaml")

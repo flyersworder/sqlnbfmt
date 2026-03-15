@@ -1,14 +1,65 @@
 import ast
+import copy
+import difflib
 import logging
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Set, Optional, Dict, Union, Tuple
 
 import nbformat
 import yaml
 from sqlglot import parse_one, errors
+
+DEFAULT_SQL_KEYWORDS = frozenset(
+    {
+        "SELECT",
+        "FROM",
+        "WHERE",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "WITH",
+        "JOIN",
+        "CREATE",
+        "DROP",
+        "ALTER",
+        "TRUNCATE",
+        "UNION",
+        "EXCEPT",
+        "INTERSECT",
+        "GROUP BY",
+        "ORDER BY",
+        "HAVING",
+        "LIMIT",
+        "OFFSET",
+        "DISTINCT",
+    }
+)
+
+DEFAULT_FUNCTION_NAMES = frozenset(
+    {
+        "read_sql",
+        "read_sql_query",
+        "read_sql_table",
+        "execute",
+        "executescript",
+        "fetchall",
+        "fetchone",
+        "fetchmany",
+        "execute_query",
+    }
+)
+
+DEFAULT_SQL_DECORATORS = frozenset(
+    {
+        "sql_decorator",
+        "query",
+        "sql_query",
+        "db_query",
+    }
+)
 
 
 @dataclass
@@ -24,9 +75,13 @@ class SQLReplacement:
 class FormattingConfig:
     """Configuration for SQL formatting."""
 
-    sql_keywords: Set[str]
-    function_names: Set[str]
-    sql_decorators: Set[str]
+    sql_keywords: Set[str] = field(default_factory=lambda: set(DEFAULT_SQL_KEYWORDS))
+    function_names: Set[str] = field(
+        default_factory=lambda: set(DEFAULT_FUNCTION_NAMES)
+    )
+    sql_decorators: Set[str] = field(
+        default_factory=lambda: set(DEFAULT_SQL_DECORATORS)
+    )
     single_line_threshold: int = 80
     indent_width: int = 4
 
@@ -49,8 +104,11 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
     return logger
 
 
-def load_config(config_path: Union[str, Path] = "config.yaml") -> FormattingConfig:
-    """Loads configuration from a YAML file."""
+def load_config(config_path: Optional[Union[str, Path]] = None) -> FormattingConfig:
+    """Loads configuration from a YAML file, or returns defaults if no path given."""
+    if config_path is None:
+        return FormattingConfig()
+
     config_file = Path(config_path)
     if not config_file.is_file():
         raise FileNotFoundError(f"Configuration file '{config_file}' not found.")
@@ -374,18 +432,30 @@ def process_notebook(
     config: FormattingConfig,
     dialect: Optional[str],
     logger: logging.Logger,
+    check_only: bool = False,
 ) -> bool:
-    """Processes a Jupyter notebook."""
+    """Processes a Jupyter notebook.
+
+    Args:
+        check_only: If True, detect changes but don't write the file.
+
+    Returns:
+        True if changes were made (or would be made in check mode).
+    """
     try:
         notebook = nbformat.read(notebook_path, as_version=4)
         changed = False
 
-        for cell in notebook.cells:
+        for cell_index, cell in enumerate(notebook.cells):
             if cell.cell_type != "code":
                 continue
 
             original_code = cell.source
             if not original_code.strip():
+                continue
+
+            if "# sqlnbfmt: skip" in original_code:
+                logger.debug(f"[Cell {cell_index}] Skipping cell (sqlnbfmt: skip)")
                 continue
 
             lines = original_code.split("\n")
@@ -452,7 +522,9 @@ def process_notebook(
                         changed = True
 
                 except SQLFormattingError as e:
-                    logger.warning(f"SQL magic formatting skipped: {e}")
+                    logger.warning(
+                        f"[Cell {cell_index}] SQL magic formatting skipped: {e}"
+                    )
 
                 continue  # Move to the next cell after handling magic command
 
@@ -478,10 +550,12 @@ def process_notebook(
                         cell.source = result
                         changed = True
             except SyntaxError:
-                logger.warning(f"Failed to parse cell:\n{original_code}")
+                logger.warning(
+                    f"[Cell {cell_index}] Failed to parse cell:\n{original_code}"
+                )
                 continue
 
-        if changed:
+        if changed and not check_only:
             nbformat.write(notebook, notebook_path)
             logger.info(f"Updated notebook: {notebook_path}")
 
@@ -490,6 +564,112 @@ def process_notebook(
     except Exception as e:
         logger.error(f"Failed to process notebook {notebook_path}: {e}", exc_info=True)
         raise
+
+
+def diff_notebook(
+    notebook_path: Union[str, Path],
+    config: FormattingConfig,
+    dialect: Optional[str],
+    logger: logging.Logger,
+) -> str:
+    """Returns a unified diff of formatting changes for a notebook."""
+    notebook_path = Path(notebook_path)
+    original_nb = nbformat.read(notebook_path, as_version=4)
+    formatted_nb = copy.deepcopy(original_nb)
+
+    # Format the copy in-memory by running the same cell logic
+    for cell_index, cell in enumerate(formatted_nb.cells):
+        if cell.cell_type != "code":
+            continue
+        original_code = cell.source
+        if not original_code.strip():
+            continue
+        if "# sqlnbfmt: skip" in original_code:
+            continue
+
+        lines = original_code.split("\n")
+        magic_cmd = None
+        magic_cmd_index = None
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#"):
+                continue
+            if stripped.startswith("%%sql") or stripped.startswith("%sql"):
+                magic_cmd = stripped.split()[0]
+                magic_cmd_index = idx
+                break
+            else:
+                break
+
+        if magic_cmd:
+            is_cell_magic = magic_cmd.startswith("%%sql")
+            if is_cell_magic:
+                sql_code = "\n".join(lines[magic_cmd_index + 1 :]).strip()
+            else:
+                sql_code = lines[magic_cmd_index][len(magic_cmd) :].strip()
+            try:
+                formatted_sql = format_sql_code(
+                    sql_code,
+                    dialect,
+                    config,
+                    is_magic_command=True,
+                    is_cell_magic=is_cell_magic,
+                )
+                if is_cell_magic:
+                    pre_magic = "\n".join(lines[:magic_cmd_index])
+                    if pre_magic:
+                        new_content = f"{pre_magic}\n{magic_cmd}\n{formatted_sql}"
+                    else:
+                        new_content = f"{magic_cmd}\n{formatted_sql}"
+                else:
+                    pre_magic = "\n".join(lines[:magic_cmd_index])
+                    if pre_magic:
+                        new_content = f"{pre_magic}\n{magic_cmd} {formatted_sql}"
+                    else:
+                        new_content = f"{magic_cmd} {formatted_sql}"
+                cell.source = new_content
+            except SQLFormattingError:
+                pass
+            continue
+
+        try:
+            tree = ast.parse(original_code)
+            line_offsets = build_line_offsets(original_code)
+            formatter = SQLStringFormatter(config, dialect, logger, line_offsets)
+            formatter.visit(tree)
+            if formatter.replacements:
+                result = original_code
+                for rep in sorted(
+                    formatter.replacements,
+                    key=lambda r: r.start_offset,
+                    reverse=True,
+                ):
+                    result = (
+                        result[: rep.start_offset]
+                        + rep.new_text
+                        + result[rep.end_offset :]
+                    )
+                cell.source = result
+        except SyntaxError:
+            continue
+
+    # Build unified diff cell-by-cell
+    diff_lines = []
+    for i, (orig_cell, fmt_cell) in enumerate(
+        zip(original_nb.cells, formatted_nb.cells)
+    ):
+        if orig_cell.source != fmt_cell.source:
+            diff_lines.extend(
+                difflib.unified_diff(
+                    orig_cell.source.splitlines(keepends=True),
+                    fmt_cell.source.splitlines(keepends=True),
+                    fromfile=f"Cell [{i}] original",
+                    tofile=f"Cell [{i}] formatted",
+                )
+            )
+    return "".join(diff_lines)
 
 
 def main():
@@ -501,7 +681,7 @@ def main():
         "notebooks", nargs="+", type=Path, help="Notebook paths to process"
     )
     parser.add_argument(
-        "--config", type=Path, default="config.yaml", help="Configuration file path"
+        "--config", type=Path, default=None, help="Configuration file path (optional)"
     )
     parser.add_argument(
         "--dialect", type=str, help="SQL dialect (e.g., mysql, postgres)"
@@ -512,27 +692,69 @@ def main():
         default="INFO",
         help="Logging level",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check formatting without modifying files (exit code 1 if changes needed)",
+    )
+    parser.add_argument(
+        "--diff",
+        action="store_true",
+        help="Print a unified diff of formatting changes",
+    )
 
     args = parser.parse_args()
     logger = setup_logging(args.log_level)
 
     try:
         config = load_config(args.config)
+    except FileNotFoundError as e:
+        logger.error(
+            f"{e}\nHint: --config is optional; omit it to use built-in defaults."
+        )
+        sys.exit(1)
+
+    try:
         changed = False
         changed_files = []
 
         for notebook in args.notebooks:
-            if process_notebook(notebook, config, args.dialect, logger):
-                changed = True
-                changed_files.append(notebook)
+            if args.diff:
+                diff_output = diff_notebook(notebook, config, args.dialect, logger)
+                if diff_output:
+                    print(diff_output, end="")
+                    changed = True
+                    changed_files.append(notebook)
 
-        # Print summary
-        if changed:
-            logger.info("Changes made to the following notebooks:")
-            for file in changed_files:
-                logger.info(f"  - {file}")
-        else:
-            logger.info("No changes needed. All notebooks are properly formatted.")
+            if args.check:
+                if process_notebook(
+                    notebook, config, args.dialect, logger, check_only=True
+                ):
+                    changed = True
+                    changed_files.append(notebook)
+            elif not args.diff:
+                if process_notebook(notebook, config, args.dialect, logger):
+                    changed = True
+                    changed_files.append(notebook)
+
+        if args.check:
+            if changed:
+                logger.error(f"{len(changed_files)} notebook(s) would be reformatted:")
+                for f in changed_files:
+                    logger.error(f"  - {f}")
+                sys.exit(1)
+            else:
+                logger.info("All notebooks are properly formatted.")
+                sys.exit(0)
+
+        # Print summary for normal mode
+        if not args.diff:
+            if changed:
+                logger.info("Changes made to the following notebooks:")
+                for file in changed_files:
+                    logger.info(f"  - {file}")
+            else:
+                logger.info("No changes needed. All notebooks are properly formatted.")
 
         sys.exit(0)
 

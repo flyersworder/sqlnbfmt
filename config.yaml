@@ -1,3 +1,5 @@
+# Optional — sqlnbfmt works without this file using built-in defaults.
+# Use this file only to override specific settings.
 # config.yaml
 
 sql_keywords:

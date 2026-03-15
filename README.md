@@ -4,16 +4,20 @@
 [![License](https://img.shields.io/pypi/l/sqlnbfmt.svg)](https://github.com/flyersworder/sqlnbfmt/blob/main/LICENSE)
 [![Python Versions](https://img.shields.io/pypi/pyversions/sqlnbfmt.svg)](https://pypi.org/project/sqlnbfmt/)
 
+> **Quick start:** `pip install sqlnbfmt && sqlnbfmt notebook.ipynb`
+
 A SQL formatter designed specifically for Jupyter Notebooks. `sqlnbfmt` automatically formats SQL queries embedded in code cells, including both Python strings and SQL magic cells (`%%sql`), helping you maintain clean and consistent code.
 
 ## Features
 
-- 🎯 **Smart SQL Detection**: Automatically identifies and formats SQL queries in code cells and magic SQL cells
-- 🌳 **AST-Powered**: Uses Abstract Syntax Tree parsing for accurate SQL string identification
-- 🔒 **Safe Formatting**: Preserves Python comments, query parameters (e.g., `%s`, `?`), and SQL comments
-- ⚙️ **Highly Configurable**: Customize formatting through YAML configuration
-- 🔄 **Pre-commit Ready**: Seamlessly integrates with pre-commit hooks
-- 📦 **Lightweight**: Only three runtime dependencies (sqlglot, nbformat, pyyaml)
+- **Zero-config**: Works out of the box with sensible defaults — no config file needed
+- **Smart SQL Detection**: Automatically identifies and formats SQL queries in code cells and magic SQL cells
+- **AST-Powered**: Uses Abstract Syntax Tree parsing for accurate SQL string identification
+- **Safe Formatting**: Preserves Python comments, query parameters (e.g., `%s`, `?`), and SQL comments
+- **CI-Friendly**: `--check` mode exits non-zero when formatting is needed; `--diff` shows what would change
+- **Skip Hints**: Add `# sqlnbfmt: skip` to any cell to exclude it from formatting
+- **Pre-commit Ready**: Seamlessly integrates with pre-commit hooks
+- **Lightweight**: Only three runtime dependencies (sqlglot, nbformat, pyyaml)
 
 ## Installation
 
@@ -30,9 +34,23 @@ Format a single notebook:
 sqlnbfmt path/to/your_notebook.ipynb
 ```
 
-Format all notebooks in a directory:
+Check formatting without modifying files (useful in CI):
 ```bash
-sqlnbfmt path/to/notebooks/
+sqlnbfmt --check path/to/your_notebook.ipynb
+```
+
+Show a diff of what would change:
+```bash
+sqlnbfmt --diff path/to/your_notebook.ipynb
+```
+
+### Skipping Cells
+
+Add a `# sqlnbfmt: skip` comment anywhere in a cell to skip formatting:
+
+```python
+# sqlnbfmt: skip
+query = "select * from my_special_table where id = 1"
 ```
 
 ### Pre-commit Integration
@@ -46,17 +64,15 @@ pip install pre-commit
 ```yaml
 repos:
   - repo: https://github.com/flyersworder/sqlnbfmt
-    rev: v0.2.0
+    rev: v0.3.0
     hooks:
       - id: sqlnbfmt
-        name: sqlnbfmt
         types: [jupyter]
-        args: [--config, config.yaml, --dialect, postgres]
 ```
-Please run the following command for help:
 
-```bash
-sqlnbfmt -h
+All arguments are optional. To specify a dialect or custom config:
+```yaml
+        args: [--dialect, postgres, --config, config.yaml]
 ```
 
 3. Install the hook:
@@ -69,7 +85,20 @@ pre-commit install
 pre-commit run --all-files
 ```
 
+### CI Usage
+
+Use `--check` in GitHub Actions to enforce formatting:
+
+```yaml
+- name: Check SQL notebook formatting
+  run: |
+    pip install sqlnbfmt
+    sqlnbfmt --check **/*.ipynb
+```
+
 ## Configuration
+
+`sqlnbfmt` works without any configuration file. A `config.yaml` is only needed to override defaults.
 
 Create a `config.yaml` file to customize formatting behavior. [Here](https://github.com/flyersworder/sqlnbfmt/blob/main/config.yaml) is a template.
 
@@ -78,8 +107,8 @@ Create a `config.yaml` file to customize formatting behavior. [Here](https://git
 | Option | Description | Default |
 |--------|-------------|---------|
 | `sql_keywords` | SQL keywords to recognize and format | Common SQL keywords |
-| `function_names` | Python functions containing SQL code | `[]` |
-| `sql_decorators` | Decorators indicating SQL code | `[]` |
+| `function_names` | Python functions containing SQL code | `read_sql`, `execute`, etc. |
+| `sql_decorators` | Decorators indicating SQL code | `query`, `sql_query`, etc. |
 | `single_line_threshold` | Maximum length before splitting SQL | 80 |
 | `indent_width` | Number of spaces for indentation | 4 |
 
@@ -108,6 +137,19 @@ ORDER BY
 """)
 ```
 
+## Troubleshooting
+
+**SQL not being formatted?**
+- Ensure the string contains at least 2 SQL keywords or a recognizable pattern like `SELECT...FROM`
+- Check that the function name is in the recognized list (use `--config` to add custom ones)
+
+**Comments being modified?**
+- Python comments (`#`) are preserved. SQL comments (`--`) inside strings are converted to `/* */` block comments by sqlglot.
+
+**Pre-commit hook fails?**
+- Make sure the `rev` matches the installed version
+- Run `pre-commit autoupdate` to get the latest version
+
 ## Contributing
 
 We welcome contributions! Here's how to get started:
@@ -127,6 +169,13 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 3. Run tests:
 ```bash
 pytest
+```
+
+4. Add eval cases: see `tests/eval/generate_fixtures.py` for examples. Run `python tests/eval/generate_fixtures.py` to regenerate fixtures.
+
+5. Install dev pre-commit hooks:
+```bash
+pre-commit install
 ```
 
 ## License

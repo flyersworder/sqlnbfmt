@@ -6,3 +6,12 @@
   types: [jupyter]
   require_serial: true
   minimum_pre_commit_version: '3.0.0'
+
+- id: sqlnbfmt-check
+  name: SQL Notebook Formatter (check)
+  description: Check SQL formatting without modifying files
+  entry: sqlnbfmt --check
+  language: python
+  types: [jupyter]
+  require_serial: true
+  minimum_pre_commit_version: '3.0.0'

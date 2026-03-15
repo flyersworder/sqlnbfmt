@@ -14,7 +14,6 @@ import pytest
 from sqlnbfmt.formatter import load_config, process_notebook
 
 EVAL_DIR = Path(__file__).resolve().parent / "eval"
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 DIALECT = "mysql"
 
 
@@ -54,7 +53,7 @@ def test_eval(case_name, logger, tmp_path):
     shutil.copy2(case_dir / "input.ipynb", work_path)
 
     # Load config and run formatter
-    config = load_config(CONFIG_PATH)
+    config = load_config()
     process_notebook(work_path, config, DIALECT, logger)
 
     # Read formatted and expected

@@ -1,6 +1,6 @@
 [project]
 name = "sqlnbfmt"
-version = "0.2.0"
+version = "0.3.0"
 description = "A tool to format SQL code in Jupyter notebooks."
 authors = [
   { name = "Qing", email = "qingye779@gmail.com" }
@@ -8,6 +8,7 @@ authors = [
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.12"
+keywords = ["sql", "jupyter", "notebook", "formatter", "sqlglot", "pre-commit"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
@@ -19,6 +20,15 @@ dependencies = [
     "sqlglot>=25.27.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/flyersworder/sqlnbfmt"
+Repository = "https://github.com/flyersworder/sqlnbfmt"
+Changelog = "https://github.com/flyersworder/sqlnbfmt/blob/main/CHANGELOG.md"
+Issues = "https://github.com/flyersworder/sqlnbfmt/issues"
+
+[project.scripts]
+sqlnbfmt = "sqlnbfmt.formatter:main"
+
 [dependency-groups]
 dev = [
     "pytest-cov>=5.0.0",
@@ -29,9 +39,6 @@ dev = [
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
-
-[project.scripts]
-sqlnbfmt = "sqlnbfmt.formatter:main"
 
 [tool.pytest.ini_options]
 markers = [
