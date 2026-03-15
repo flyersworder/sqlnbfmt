@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Python comments in code cells are no longer stripped during formatting ([#2](https://github.com/qingye3/sqlnbfmt/issues/2))
+- Python comments in code cells are no longer stripped during formatting ([#2](https://github.com/flyersworder/sqlnbfmt/issues/2))
 
 ### Changed
 

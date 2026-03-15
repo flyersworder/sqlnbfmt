@@ -10,10 +10,10 @@ A SQL formatter designed specifically for Jupyter Notebooks. `sqlnbfmt` automati
 
 - 🎯 **Smart SQL Detection**: Automatically identifies and formats SQL queries in code cells and magic SQL cells
 - 🌳 **AST-Powered**: Uses Abstract Syntax Tree parsing for accurate SQL string identification
-- 🔒 **Safe Formatting**: Preserves query parameters (e.g., `%s`, `?`) and SQL comments
+- 🔒 **Safe Formatting**: Preserves Python comments, query parameters (e.g., `%s`, `?`), and SQL comments
 - ⚙️ **Highly Configurable**: Customize formatting through YAML configuration
 - 🔄 **Pre-commit Ready**: Seamlessly integrates with pre-commit hooks
-- 📦 **Zero Dependencies**: Minimal installation footprint
+- 📦 **Lightweight**: Only three runtime dependencies (sqlglot, nbformat, pyyaml)
 
 ## Installation
 
@@ -46,14 +46,14 @@ pip install pre-commit
 ```yaml
 repos:
   - repo: https://github.com/flyersworder/sqlnbfmt
-    rev: v0.1.1
+    rev: v0.2.0
     hooks:
       - id: sqlnbfmt
         name: sqlnbfmt
         types: [jupyter]
         args: [--config, config.yaml, --dialect, postgres]
 ```
-Please fun the following command in your CMD for help:
+Please run the following command for help:
 
 ```bash
 sqlnbfmt -h
