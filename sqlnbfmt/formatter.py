@@ -39,7 +39,7 @@ class SQLFormattingError(Exception):
 
 def setup_logging(level: str = "INFO") -> logging.Logger:
     """Sets up logging with the specified level."""
-    logger = logging.getLogger('formatter')
+    logger = logging.getLogger("formatter")
     logger.setLevel(level.upper())
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stdout)
@@ -77,7 +77,7 @@ def build_line_offsets(source: str) -> list:
     """Returns list where offsets[i] is the character offset of line i+1 in source."""
     offsets = [0]
     for i, ch in enumerate(source):
-        if ch == '\n':
+        if ch == "\n":
             offsets.append(i + 1)
     return offsets
 
@@ -114,7 +114,7 @@ def format_sql_code(
         str: The formatted SQL code.
     """
     try:
-        logger = logging.getLogger('formatter')
+        logger = logging.getLogger("formatter")
 
         if not sql_code.strip():
             return sql_code
@@ -131,7 +131,7 @@ def format_sql_code(
                 placeholder_mapping[temp_placeholder] = placeholder
 
         # Handle automatic placeholders (%s, ?)
-        auto_placeholder_pattern = re.compile(r'%s|\?')
+        auto_placeholder_pattern = re.compile(r"%s|\?")
         auto_placeholders = auto_placeholder_pattern.findall(temp_sql)
         auto_placeholder_mapping = {}
         for idx, ph in enumerate(auto_placeholders):
@@ -144,9 +144,7 @@ def format_sql_code(
         # Parse and format SQL
         parsed = parse_one(temp_sql, read=dialect)
         formatted_sql = parsed.sql(
-            pretty=not force_single_line,
-            indent=config.indent_width,
-            dialect=dialect
+            pretty=not force_single_line, indent=config.indent_width, dialect=dialect
         )
 
         # Apply formatting based on context
@@ -162,14 +160,22 @@ def format_sql_code(
         if placeholders:
             for temp_placeholder, original_placeholder in placeholder_mapping.items():
                 # Remove quotes around placeholders if any
-                formatted_sql = formatted_sql.replace(f"'{temp_placeholder}'", temp_placeholder)
-                formatted_sql = formatted_sql.replace(f'"{temp_placeholder}"', temp_placeholder)
+                formatted_sql = formatted_sql.replace(
+                    f"'{temp_placeholder}'", temp_placeholder
+                )
+                formatted_sql = formatted_sql.replace(
+                    f'"{temp_placeholder}"', temp_placeholder
+                )
                 # Replace temp placeholders with original placeholders
-                formatted_sql = formatted_sql.replace(temp_placeholder, original_placeholder)
+                formatted_sql = formatted_sql.replace(
+                    temp_placeholder, original_placeholder
+                )
 
         # Restore automatic placeholders
         for temp_placeholder, original_placeholder in auto_placeholder_mapping.items():
-            formatted_sql = formatted_sql.replace(temp_placeholder, original_placeholder)
+            formatted_sql = formatted_sql.replace(
+                temp_placeholder, original_placeholder
+            )
 
         # Logging for debugging purposes
         logger.debug(f"Original SQL:\n{sql_code}")
@@ -187,8 +193,11 @@ class SQLStringFormatter(ast.NodeVisitor):
     """AST NodeVisitor that collects SQL string replacements."""
 
     def __init__(
-        self, config: FormattingConfig, dialect: Optional[str], logger: logging.Logger,
-        line_offsets: list
+        self,
+        config: FormattingConfig,
+        dialect: Optional[str],
+        logger: logging.Logger,
+        line_offsets: list,
     ):
         super().__init__()
         self.config = config
@@ -249,7 +258,7 @@ class SQLStringFormatter(ast.NodeVisitor):
         self,
         node: Union[ast.Constant, ast.JoinedStr],
         force_single_line: bool = False,
-        in_function: bool = False
+        in_function: bool = False,
     ) -> Optional[str]:
         """Formats SQL code in AST nodes. Returns replacement text or None."""
         try:
@@ -299,19 +308,18 @@ class SQLStringFormatter(ast.NodeVisitor):
             self.logger.warning(f"Unexpected error during SQL formatting: {e}")
             return None
 
-    def _build_replacement_text(self, formatted_sql: str, is_fstring: bool, in_function: bool) -> str:
+    def _build_replacement_text(
+        self, formatted_sql: str, is_fstring: bool, in_function: bool
+    ) -> str:
         """Constructs the replacement string literal text."""
-        prefix = 'f' if is_fstring else ''
-        if in_function and '\n' in formatted_sql:
+        prefix = "f" if is_fstring else ""
+        if in_function and "\n" in formatted_sql:
             indent = " " * 4
-            lines = formatted_sql.split('\n')
-            indented_lines = [
-                indent + line if line.strip() else line
-                for line in lines
-            ]
-            indented_sql = '\n'.join(indented_lines)
+            lines = formatted_sql.split("\n")
+            indented_lines = [indent + line if line.strip() else line for line in lines]
+            indented_sql = "\n".join(indented_lines)
             return f'\n{indent}{prefix}"""\n{indented_sql}\n{indent}"""\n'
-        elif '\n' in formatted_sql:
+        elif "\n" in formatted_sql:
             return f'{prefix}"""\n{formatted_sql}\n"""'
         else:
             return f'{prefix}"{formatted_sql}"'
@@ -334,13 +342,19 @@ class SQLStringFormatter(ast.NodeVisitor):
                     replacement_text = self.format_sql_node(arg, in_function=True)
                     if replacement_text:
                         start, end = node_offsets(arg, self.line_offsets)
-                        self.replacements.append(SQLReplacement(start, end, replacement_text))
+                        self.replacements.append(
+                            SQLReplacement(start, end, replacement_text)
+                        )
             for keyword in node.keywords:
                 if isinstance(keyword.value, (ast.Constant, ast.JoinedStr)):
-                    replacement_text = self.format_sql_node(keyword.value, in_function=True)
+                    replacement_text = self.format_sql_node(
+                        keyword.value, in_function=True
+                    )
                     if replacement_text:
                         start, end = node_offsets(keyword.value, self.line_offsets)
-                        self.replacements.append(SQLReplacement(start, end, replacement_text))
+                        self.replacements.append(
+                            SQLReplacement(start, end, replacement_text)
+                        )
         self.generic_visit(node)
 
     @staticmethod
@@ -455,7 +469,11 @@ def process_notebook(
                         key=lambda r: r.start_offset,
                         reverse=True,
                     ):
-                        result = result[:rep.start_offset] + rep.new_text + result[rep.end_offset:]
+                        result = (
+                            result[: rep.start_offset]
+                            + rep.new_text
+                            + result[rep.end_offset :]
+                        )
                     if result != original_code:
                         cell.source = result
                         changed = True
