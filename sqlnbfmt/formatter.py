@@ -6,11 +6,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Set, Optional, Dict, Union, Tuple
 
-import astor
-import black
 import nbformat
 import yaml
 from sqlglot import parse_one, errors
+
+
+@dataclass
+class SQLReplacement:
+    """A text replacement to apply to the source code."""
+
+    start_offset: int
+    end_offset: int
+    new_text: str
 
 
 @dataclass
@@ -21,7 +28,6 @@ class FormattingConfig:
     function_names: Set[str]
     sql_decorators: Set[str]
     single_line_threshold: int = 80
-    preserve_comments: bool = True
     indent_width: int = 4
 
 
@@ -59,15 +65,28 @@ def load_config(config_path: Union[str, Path] = "config.yaml") -> FormattingConf
                 single_line_threshold=config.get("formatting_options", {}).get(
                     "single_line_threshold", 80
                 ),
-                preserve_comments=config.get("formatting_options", {}).get(
-                    "preserve_comments", True
-                ),
                 indent_width=config.get("formatting_options", {}).get(
                     "indent_width", 4
                 ),
             )
     except yaml.YAMLError as e:
         raise yaml.YAMLError(f"Error parsing the configuration file: {e}")
+
+
+def build_line_offsets(source: str) -> list:
+    """Returns list where offsets[i] is the character offset of line i+1 in source."""
+    offsets = [0]
+    for i, ch in enumerate(source):
+        if ch == '\n':
+            offsets.append(i + 1)
+    return offsets
+
+
+def node_offsets(node: ast.AST, line_offsets: list) -> Tuple[int, int]:
+    """Converts AST node line/col positions to (start, end) character offsets."""
+    start = line_offsets[node.lineno - 1] + node.col_offset
+    end = line_offsets[node.end_lineno - 1] + node.end_col_offset
+    return start, end
 
 
 def format_sql_code(
@@ -164,16 +183,19 @@ def format_sql_code(
         raise SQLFormattingError(f"Unexpected error during SQL formatting: {e}")
 
 
-class SQLStringFormatter(ast.NodeTransformer):
-    """AST NodeTransformer that formats SQL strings."""
+class SQLStringFormatter(ast.NodeVisitor):
+    """AST NodeVisitor that collects SQL string replacements."""
 
     def __init__(
-        self, config: FormattingConfig, dialect: Optional[str], logger: logging.Logger
+        self, config: FormattingConfig, dialect: Optional[str], logger: logging.Logger,
+        line_offsets: list
     ):
         super().__init__()
         self.config = config
         self.dialect = dialect
         self.logger = logger
+        self.line_offsets = line_offsets
+        self.replacements: list = []
         self.changed = False
 
     def is_likely_sql(self, code: str) -> bool:
@@ -215,7 +237,7 @@ class SQLStringFormatter(ast.NodeTransformer):
             if isinstance(value, ast.Constant):
                 sql_parts.append(value.value)
             elif isinstance(value, ast.FormattedValue):
-                expr = astor.to_source(value.value).strip()
+                expr = ast.unparse(value.value)
                 placeholder = f"PLACEHOLDER_{placeholder_counter}"
                 sql_parts.append(placeholder)
                 placeholders[placeholder] = expr
@@ -224,128 +246,52 @@ class SQLStringFormatter(ast.NodeTransformer):
         return "".join(sql_parts), placeholders
 
     def format_sql_node(
-        self, 
-        node: Union[ast.Constant, ast.JoinedStr], 
+        self,
+        node: Union[ast.Constant, ast.JoinedStr],
         force_single_line: bool = False,
         in_function: bool = False
-    ) -> Optional[ast.AST]:
-        """Formats SQL code in AST nodes."""
+    ) -> Optional[str]:
+        """Formats SQL code in AST nodes. Returns replacement text or None."""
         try:
+            is_fstring = isinstance(node, ast.JoinedStr)
+            placeholders = {}
+
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if not self.is_likely_sql(node.value):
                     return None
-
-                formatted_sql = format_sql_code(
-                    node.value,
-                    self.dialect,
-                    self.config,
-                    force_single_line=force_single_line,
-                )
-
-                if formatted_sql != node.value:
-                    self.changed = True
-                    if in_function and '\n' in formatted_sql:
-                        # Apply Black-style indentation for function arguments
-                        lines = formatted_sql.split('\n')
-                        # Indent all lines including the first SQL line
-                        indented_lines = [
-                            " " * 4 + line if line.strip() else line
-                            for line in lines
-                        ]
-                        formatted_sql = '\n'.join(indented_lines)
-                        
-                        # Reconstruct the string with appropriate quotes
-                        formatted_str = f'"""\n{formatted_sql}\n{" " * 4}"""'
-                    else:
-                        # Ensure newlines are added around the formatted SQL
-                        formatted_str = f'"""\n{formatted_sql}\n"""'
-                    
-                    formatted_node = ast.parse(formatted_str).body[0].value
-                    return formatted_node
-
+                sql_str = node.value
             elif isinstance(node, ast.JoinedStr):
                 sql_str, placeholders = self.extract_fstring_parts(node)
                 if not sql_str or not self.is_likely_sql(sql_str):
                     return None
+            else:
+                return None
 
-                try:
-                    formatted_sql = format_sql_code(
-                        sql_str,
-                        self.dialect,
-                        self.config,
-                        placeholders=placeholders,
-                        force_single_line=force_single_line,
-                    )
-                except SQLFormattingError:
-                    return None
+            try:
+                formatted_sql = format_sql_code(
+                    sql_str,
+                    self.dialect,
+                    self.config,
+                    placeholders=placeholders if placeholders else None,
+                    force_single_line=force_single_line,
+                )
+            except SQLFormattingError:
+                return None
 
-                if placeholders:
-                    for placeholder in placeholders.keys():
-                        if not placeholder:
-                            continue
-                        formatted_sql = formatted_sql.replace(f"'{placeholder}'", placeholder)
-                        formatted_sql = formatted_sql.replace(f'"{placeholder}"', placeholder)
+            if formatted_sql == sql_str:
+                return None
 
-                if formatted_sql != sql_str:
-                    self.changed = True
-                    # Apply Black-style indentation for function arguments
-                    if in_function and '\n' in formatted_sql:
-                        lines = formatted_sql.split('\n')
-                        # Indent all lines including the first SQL line
-                        indented_lines = [
-                            " " * 4 + line if line.strip() else line
-                            for line in lines
-                        ]
-                        formatted_sql = '\n'.join(indented_lines)
+            # Restore placeholders as f-string expressions
+            if placeholders:
+                for ph in placeholders:
+                    formatted_sql = formatted_sql.replace(f"'{ph}'", ph)
+                    formatted_sql = formatted_sql.replace(f'"{ph}"', ph)
+                for ph, expr in placeholders.items():
+                    formatted_sql = formatted_sql.replace(ph, f"{{{expr}}}")
 
-                    # Reconstruct the f-string
-                    new_values = []
-                    if not placeholders:
-                        new_values.append(ast.Constant(value=formatted_sql))
-                    else:
-                        pattern = re.compile('|'.join(re.escape(k) for k in placeholders.keys() if k))
-                        idx = 0
-                        while idx < len(formatted_sql):
-                            match = pattern.search(formatted_sql, idx)
-                            if match:
-                                if match.start() > idx:
-                                    new_values.append(ast.Constant(value=formatted_sql[idx:match.start()]))
-                                placeholder = match.group()
-                                expr_str = placeholders[placeholder].strip()
-                                try:
-                                    expr_ast = ast.parse(expr_str, mode='eval').body
-                                except SyntaxError as e:
-                                    self.logger.warning(f"Failed to parse expression '{expr_str}': {e}")
-                                    return None
-                                new_values.append(ast.FormattedValue(
-                                    value=expr_ast,
-                                    conversion=-1,
-                                    format_spec=None
-                                ))
-                                idx = match.end()
-                            else:
-                                new_values.append(ast.Constant(value=formatted_sql[idx:]))
-                                break
+            self.changed = True
+            return self._build_replacement_text(formatted_sql, is_fstring, in_function)
 
-                    new_node = ast.JoinedStr(values=new_values)
-                    if '\n' in formatted_sql:
-                        if in_function:
-                            formatted_fstring = ast.JoinedStr(values=[
-                                ast.Constant(value='\n'),
-                                *new_node.values,
-                                ast.Constant(value=f'\n{" " * 4}')
-                            ])
-                        else:
-                            formatted_fstring = ast.JoinedStr(values=[
-                                ast.Constant(value='\n'),
-                                *new_node.values,
-                                ast.Constant(value='\n')
-                            ])
-                    else:
-                        formatted_fstring = new_node
-                    return formatted_fstring
-
-            return None
         except SQLFormattingError as e:
             self.logger.warning(f"SQL formatting skipped: {e}")
             return None
@@ -353,30 +299,49 @@ class SQLStringFormatter(ast.NodeTransformer):
             self.logger.warning(f"Unexpected error during SQL formatting: {e}")
             return None
 
-    def visit_Assign(self, node: ast.Assign) -> ast.AST:
+    def _build_replacement_text(self, formatted_sql: str, is_fstring: bool, in_function: bool) -> str:
+        """Constructs the replacement string literal text."""
+        prefix = 'f' if is_fstring else ''
+        if in_function and '\n' in formatted_sql:
+            indent = " " * 4
+            lines = formatted_sql.split('\n')
+            indented_lines = [
+                indent + line if line.strip() else line
+                for line in lines
+            ]
+            indented_sql = '\n'.join(indented_lines)
+            return f'\n{indent}{prefix}"""\n{indented_sql}\n{indent}"""\n'
+        elif '\n' in formatted_sql:
+            return f'{prefix}"""\n{formatted_sql}\n"""'
+        else:
+            return f'{prefix}"{formatted_sql}"'
+
+    def visit_Assign(self, node: ast.Assign) -> None:
         """Handles assignments."""
         if isinstance(node.value, (ast.Constant, ast.JoinedStr)):
-            formatted_node = self.format_sql_node(node.value)
-            if formatted_node:
-                node.value = formatted_node
-        return self.generic_visit(node)
+            replacement_text = self.format_sql_node(node.value)
+            if replacement_text:
+                start, end = node_offsets(node.value, self.line_offsets)
+                self.replacements.append(SQLReplacement(start, end, replacement_text))
+        self.generic_visit(node)
 
-    def visit_Call(self, node: ast.Call) -> ast.AST:
+    def visit_Call(self, node: ast.Call) -> None:
         """Handles function calls."""
         func_name = self.get_full_func_name(node.func)
         if any(name in func_name for name in self.config.function_names):
-            for idx, arg in enumerate(node.args):
+            for arg in node.args:
                 if isinstance(arg, (ast.Constant, ast.JoinedStr)):
-                    # Format with Black-style indentation for function arguments
-                    formatted_node = self.format_sql_node(arg, in_function=True)
-                    if formatted_node:
-                        node.args[idx] = formatted_node
+                    replacement_text = self.format_sql_node(arg, in_function=True)
+                    if replacement_text:
+                        start, end = node_offsets(arg, self.line_offsets)
+                        self.replacements.append(SQLReplacement(start, end, replacement_text))
             for keyword in node.keywords:
                 if isinstance(keyword.value, (ast.Constant, ast.JoinedStr)):
-                    formatted_node = self.format_sql_node(keyword.value, in_function=True)
-                    if formatted_node:
-                        keyword.value = formatted_node
-        return self.generic_visit(node)
+                    replacement_text = self.format_sql_node(keyword.value, in_function=True)
+                    if replacement_text:
+                        start, end = node_offsets(keyword.value, self.line_offsets)
+                        self.replacements.append(SQLReplacement(start, end, replacement_text))
+        self.generic_visit(node)
 
     @staticmethod
     def get_full_func_name(node: ast.AST) -> str:
@@ -477,19 +442,22 @@ def process_notebook(
 
                 continue  # Move to the next cell after handling magic command
 
-            # Handle regular Python code
+            # Handle regular Python code with surgical string replacement
             try:
                 tree = ast.parse(original_code)
-                formatter = SQLStringFormatter(config, dialect, logger)
-                new_tree = formatter.visit(tree)
-                if formatter.changed:
-                    # Use astor to convert AST back to source code
-                    formatted_code = astor.to_source(new_tree)
-                    # Now format with black
-                    formatted_code = black.format_str(formatted_code, mode=black.FileMode())
-                    
-                    if formatted_code != original_code:
-                        cell.source = formatted_code
+                line_offsets = build_line_offsets(original_code)
+                formatter = SQLStringFormatter(config, dialect, logger, line_offsets)
+                formatter.visit(tree)
+                if formatter.replacements:
+                    result = original_code
+                    for rep in sorted(
+                        formatter.replacements,
+                        key=lambda r: r.start_offset,
+                        reverse=True,
+                    ):
+                        result = result[:rep.start_offset] + rep.new_text + result[rep.end_offset:]
+                    if result != original_code:
+                        cell.source = result
                         changed = True
             except SyntaxError:
                 logger.warning(f"Failed to parse cell:\n{original_code}")
