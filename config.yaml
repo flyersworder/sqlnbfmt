@@ -32,7 +32,7 @@ function_names:
   - fetchall
   - fetchone
   - fetchmany
-  - exeucte_query
+  - execute_query
 
 # Decorator names that contain SQL
 sql_decorators:
