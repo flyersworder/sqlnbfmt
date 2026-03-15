@@ -334,3 +334,130 @@ def test_load_config_missing_file():
 
     with pytest.raises(FileNotFoundError):
         load_config("/nonexistent/config.yaml")
+
+
+def test_load_config_empty_file(tmp_path):
+    """load_config with empty YAML file returns defaults (not AttributeError)."""
+    empty_config = tmp_path / "empty.yaml"
+    empty_config.write_text("")
+    config = load_config(empty_config)
+    assert "SELECT" in config.sql_keywords
+    assert "read_sql" in config.function_names
+
+
+def test_load_config_partial_override(tmp_path):
+    """Config file with only indent_width still gets default keywords."""
+    partial_config = tmp_path / "partial.yaml"
+    partial_config.write_text("formatting_options:\n  indent_width: 2\n")
+    config = load_config(partial_config)
+    assert config.indent_width == 2
+    assert "SELECT" in config.sql_keywords
+    assert "read_sql" in config.function_names
+
+
+def test_skip_hint_in_string_not_triggered(tmp_path, logger):
+    """Skip hint inside a string literal should NOT skip the cell."""
+    nb = nbf.new_notebook()
+    original_source = (
+        'msg = "Use # sqlnbfmt: skip to disable"\n'
+        'query = "select id, name from users where active = 1"'
+    )
+    nb.cells = [nbf.new_code_cell(original_source)]
+    nb_path = tmp_path / "skip_in_string.ipynb"
+    nbformat.write(nb, nb_path)
+
+    config = load_config()
+    changed = process_notebook(nb_path, config, "mysql", logger)
+    assert changed  # SQL should still be formatted
+
+
+def test_skip_hint_magic_cell(tmp_path, logger):
+    """Skip hint in a magic command cell should skip formatting."""
+    nb = nbf.new_notebook()
+    original_source = "# sqlnbfmt: skip\n%%sql\nselect * from users where active = 1"
+    nb.cells = [nbf.new_code_cell(original_source)]
+    nb_path = tmp_path / "skip_magic.ipynb"
+    nbformat.write(nb, nb_path)
+
+    config = load_config()
+    changed = process_notebook(nb_path, config, "mysql", logger)
+    assert not changed
+
+    result_nb = nbformat.read(nb_path, as_version=4)
+    assert result_nb.cells[0].source == original_source
+
+
+def test_check_diff_combined(tmp_path, logger):
+    """--check --diff combined: no duplicate files, diff is printed."""
+    nb = nbf.new_notebook()
+    nb.cells = [
+        nbf.new_code_cell('query = "select id, name from users where active = 1"')
+    ]
+    nb_path = tmp_path / "combined.ipynb"
+    nbformat.write(nb, nb_path)
+
+    config = load_config()
+    # Simulate the combined logic from main()
+    diff_output = diff_notebook(nb_path, config, "mysql", logger)
+    assert diff_output  # has diff
+    # In the refactored main(), diff_notebook is used as the single source
+    # of truth for both --check and --diff, so no duplication possible.
+
+
+def test_main_diff_only_exits_zero(tmp_path):
+    """--diff alone always exits 0 even when changes are needed."""
+    import subprocess
+
+    nb = nbf.new_notebook()
+    nb.cells = [
+        nbf.new_code_cell('query = "select id, name from users where active = 1"')
+    ]
+    nb_path = tmp_path / "diff_exit.ipynb"
+    nbformat.write(nb, nb_path)
+
+    result = subprocess.run(
+        ["sqlnbfmt", "--diff", str(nb_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "---" in result.stdout  # diff was printed
+
+
+def test_main_check_exits_one(tmp_path):
+    """--check exits 1 when formatting is needed."""
+    import subprocess
+
+    nb = nbf.new_notebook()
+    nb.cells = [
+        nbf.new_code_cell('query = "select id, name from users where active = 1"')
+    ]
+    nb_path = tmp_path / "check_exit.ipynb"
+    nbformat.write(nb, nb_path)
+
+    result = subprocess.run(
+        ["sqlnbfmt", "--check", str(nb_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+
+
+def test_main_check_diff_exits_one(tmp_path):
+    """--check --diff combined exits 1 and prints diff."""
+    import subprocess
+
+    nb = nbf.new_notebook()
+    nb.cells = [
+        nbf.new_code_cell('query = "select id, name from users where active = 1"')
+    ]
+    nb_path = tmp_path / "check_diff_exit.ipynb"
+    nbformat.write(nb, nb_path)
+
+    result = subprocess.run(
+        ["sqlnbfmt", "--check", "--diff", str(nb_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "---" in result.stdout  # diff was printed

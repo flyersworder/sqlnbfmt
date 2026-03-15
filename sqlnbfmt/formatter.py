@@ -116,10 +116,16 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> FormattingCon
     try:
         with open(config_file) as file:
             config = yaml.safe_load(file)
+            if config is None:
+                return FormattingConfig()
             return FormattingConfig(
-                sql_keywords=set(config.get("sql_keywords", [])),
-                function_names=set(config.get("function_names", [])),
-                sql_decorators=set(config.get("sql_decorators", [])),
+                sql_keywords=set(config.get("sql_keywords", DEFAULT_SQL_KEYWORDS)),
+                function_names=set(
+                    config.get("function_names", DEFAULT_FUNCTION_NAMES)
+                ),
+                sql_decorators=set(
+                    config.get("sql_decorators", DEFAULT_SQL_DECORATORS)
+                ),
                 single_line_threshold=config.get("formatting_options", {}).get(
                     "single_line_threshold", 80
                 ),
@@ -372,7 +378,7 @@ class SQLStringFormatter(ast.NodeVisitor):
         """Constructs the replacement string literal text."""
         prefix = "f" if is_fstring else ""
         if in_function and "\n" in formatted_sql:
-            indent = " " * 4
+            indent = " " * self.config.indent_width
             lines = formatted_sql.split("\n")
             indented_lines = [indent + line if line.strip() else line for line in lines]
             indented_sql = "\n".join(indented_lines)
@@ -427,6 +433,139 @@ class SQLStringFormatter(ast.NodeVisitor):
         return ".".join(reversed(parts))
 
 
+def _has_skip_hint(source: str) -> bool:
+    """Check if any comment line contains the sqlnbfmt: skip directive.
+
+    Only dedicated comment lines are recognised (the line must start with ``#``
+    after stripping whitespace).  Inline trailing comments like
+    ``x = 1  # sqlnbfmt: skip`` are intentionally ignored so that the directive
+    cannot be triggered accidentally from within an expression or string.
+    """
+    return any(
+        line.strip().startswith("#") and "sqlnbfmt: skip" in line
+        for line in source.split("\n")
+    )
+
+
+def _format_cells(
+    notebook: nbformat.NotebookNode,
+    config: FormattingConfig,
+    dialect: Optional[str],
+    logger: logging.Logger,
+) -> bool:
+    """Format cells in-place. Returns True if any cell was modified."""
+    changed = False
+
+    for cell_index, cell in enumerate(notebook.cells):
+        if cell.cell_type != "code":
+            continue
+
+        original_code = cell.source
+        if not original_code.strip():
+            continue
+
+        if _has_skip_hint(original_code):
+            logger.debug(f"[Cell {cell_index}] Skipping cell (sqlnbfmt: skip)")
+            continue
+
+        lines = original_code.split("\n")
+
+        # Initialize variables to track magic commands
+        magic_cmd = None
+        magic_cmd_index = None
+
+        # Iterate through lines to find the first non-comment magic command
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+
+            if not stripped:
+                continue  # Skip empty lines
+
+            if stripped.startswith("#"):
+                continue  # Skip comment lines
+
+            if stripped.startswith("%%sql") or stripped.startswith("%sql"):
+                magic_cmd = stripped.split()[0]
+                magic_cmd_index = idx
+                break  # Magic command found
+
+            else:
+                break  # Non-magic, non-comment line found
+
+        if magic_cmd:
+            is_cell_magic = magic_cmd.startswith("%%sql")
+
+            if is_cell_magic:
+                # Cell magic: SQL code starts from the next line
+                sql_code = "\n".join(lines[magic_cmd_index + 1 :]).strip()
+            else:
+                # Line magic: SQL code is on the same line after the magic command
+                sql_code = lines[magic_cmd_index][len(magic_cmd) :].strip()
+
+            try:
+                formatted_sql = format_sql_code(
+                    sql_code,
+                    dialect,
+                    config,
+                    is_magic_command=True,
+                    is_cell_magic=is_cell_magic,
+                )
+
+                # Reconstruct the cell content
+                if is_cell_magic:
+                    # Preserve comments before the magic command
+                    pre_magic = "\n".join(lines[:magic_cmd_index])
+                    if pre_magic:
+                        new_content = f"{pre_magic}\n{magic_cmd}\n{formatted_sql}"
+                    else:
+                        new_content = f"{magic_cmd}\n{formatted_sql}"
+                else:
+                    # Preserve comments before the magic command
+                    pre_magic = "\n".join(lines[:magic_cmd_index])
+                    if pre_magic:
+                        new_content = f"{pre_magic}\n{magic_cmd} {formatted_sql}"
+                    else:
+                        new_content = f"{magic_cmd} {formatted_sql}"
+
+                if new_content != original_code:
+                    cell.source = new_content
+                    changed = True
+
+            except SQLFormattingError as e:
+                logger.warning(f"[Cell {cell_index}] SQL magic formatting skipped: {e}")
+
+            continue  # Move to the next cell after handling magic command
+
+        # Handle regular Python code with surgical string replacement
+        try:
+            tree = ast.parse(original_code)
+            line_offsets = build_line_offsets(original_code)
+            formatter = SQLStringFormatter(config, dialect, logger, line_offsets)
+            formatter.visit(tree)
+            if formatter.replacements:
+                result = original_code
+                for rep in sorted(
+                    formatter.replacements,
+                    key=lambda r: r.start_offset,
+                    reverse=True,
+                ):
+                    result = (
+                        result[: rep.start_offset]
+                        + rep.new_text
+                        + result[rep.end_offset :]
+                    )
+                if result != original_code:
+                    cell.source = result
+                    changed = True
+        except SyntaxError:
+            logger.warning(
+                f"[Cell {cell_index}] Failed to parse cell:\n{original_code}"
+            )
+            continue
+
+    return changed
+
+
 def process_notebook(
     notebook_path: Union[str, Path],
     config: FormattingConfig,
@@ -444,116 +583,7 @@ def process_notebook(
     """
     try:
         notebook = nbformat.read(notebook_path, as_version=4)
-        changed = False
-
-        for cell_index, cell in enumerate(notebook.cells):
-            if cell.cell_type != "code":
-                continue
-
-            original_code = cell.source
-            if not original_code.strip():
-                continue
-
-            if "# sqlnbfmt: skip" in original_code:
-                logger.debug(f"[Cell {cell_index}] Skipping cell (sqlnbfmt: skip)")
-                continue
-
-            lines = original_code.split("\n")
-
-            # Initialize variables to track magic commands
-            magic_cmd = None
-            magic_cmd_index = None
-
-            # Iterate through lines to find the first non-comment magic command
-            for idx, line in enumerate(lines):
-                stripped = line.strip()
-
-                if not stripped:
-                    continue  # Skip empty lines
-
-                if stripped.startswith("#"):
-                    continue  # Skip comment lines
-
-                if stripped.startswith("%%sql") or stripped.startswith("%sql"):
-                    magic_cmd = stripped.split()[0]
-                    magic_cmd_index = idx
-                    break  # Magic command found
-
-                else:
-                    break  # Non-magic, non-comment line found
-
-            if magic_cmd:
-                is_cell_magic = magic_cmd.startswith("%%sql")
-
-                if is_cell_magic:
-                    # Cell magic: SQL code starts from the next line
-                    sql_code = "\n".join(lines[magic_cmd_index + 1 :]).strip()
-                else:
-                    # Line magic: SQL code is on the same line after the magic command
-                    sql_code = lines[magic_cmd_index][len(magic_cmd) :].strip()
-
-                try:
-                    formatted_sql = format_sql_code(
-                        sql_code,
-                        dialect,
-                        config,
-                        is_magic_command=True,
-                        is_cell_magic=is_cell_magic,
-                    )
-
-                    # Reconstruct the cell content
-                    if is_cell_magic:
-                        # Preserve comments before the magic command
-                        pre_magic = "\n".join(lines[:magic_cmd_index])
-                        if pre_magic:
-                            new_content = f"{pre_magic}\n{magic_cmd}\n{formatted_sql}"
-                        else:
-                            new_content = f"{magic_cmd}\n{formatted_sql}"
-                    else:
-                        # Preserve comments before the magic command
-                        pre_magic = "\n".join(lines[:magic_cmd_index])
-                        if pre_magic:
-                            new_content = f"{pre_magic}\n{magic_cmd} {formatted_sql}"
-                        else:
-                            new_content = f"{magic_cmd} {formatted_sql}"
-
-                    if new_content != original_code:
-                        cell.source = new_content
-                        changed = True
-
-                except SQLFormattingError as e:
-                    logger.warning(
-                        f"[Cell {cell_index}] SQL magic formatting skipped: {e}"
-                    )
-
-                continue  # Move to the next cell after handling magic command
-
-            # Handle regular Python code with surgical string replacement
-            try:
-                tree = ast.parse(original_code)
-                line_offsets = build_line_offsets(original_code)
-                formatter = SQLStringFormatter(config, dialect, logger, line_offsets)
-                formatter.visit(tree)
-                if formatter.replacements:
-                    result = original_code
-                    for rep in sorted(
-                        formatter.replacements,
-                        key=lambda r: r.start_offset,
-                        reverse=True,
-                    ):
-                        result = (
-                            result[: rep.start_offset]
-                            + rep.new_text
-                            + result[rep.end_offset :]
-                        )
-                    if result != original_code:
-                        cell.source = result
-                        changed = True
-            except SyntaxError:
-                logger.warning(
-                    f"[Cell {cell_index}] Failed to parse cell:\n{original_code}"
-                )
-                continue
+        changed = _format_cells(notebook, config, dialect, logger)
 
         if changed and not check_only:
             nbformat.write(notebook, notebook_path)
@@ -577,83 +607,7 @@ def diff_notebook(
     original_nb = nbformat.read(notebook_path, as_version=4)
     formatted_nb = copy.deepcopy(original_nb)
 
-    # Format the copy in-memory by running the same cell logic
-    for cell_index, cell in enumerate(formatted_nb.cells):
-        if cell.cell_type != "code":
-            continue
-        original_code = cell.source
-        if not original_code.strip():
-            continue
-        if "# sqlnbfmt: skip" in original_code:
-            continue
-
-        lines = original_code.split("\n")
-        magic_cmd = None
-        magic_cmd_index = None
-        for idx, line in enumerate(lines):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("#"):
-                continue
-            if stripped.startswith("%%sql") or stripped.startswith("%sql"):
-                magic_cmd = stripped.split()[0]
-                magic_cmd_index = idx
-                break
-            else:
-                break
-
-        if magic_cmd:
-            is_cell_magic = magic_cmd.startswith("%%sql")
-            if is_cell_magic:
-                sql_code = "\n".join(lines[magic_cmd_index + 1 :]).strip()
-            else:
-                sql_code = lines[magic_cmd_index][len(magic_cmd) :].strip()
-            try:
-                formatted_sql = format_sql_code(
-                    sql_code,
-                    dialect,
-                    config,
-                    is_magic_command=True,
-                    is_cell_magic=is_cell_magic,
-                )
-                if is_cell_magic:
-                    pre_magic = "\n".join(lines[:magic_cmd_index])
-                    if pre_magic:
-                        new_content = f"{pre_magic}\n{magic_cmd}\n{formatted_sql}"
-                    else:
-                        new_content = f"{magic_cmd}\n{formatted_sql}"
-                else:
-                    pre_magic = "\n".join(lines[:magic_cmd_index])
-                    if pre_magic:
-                        new_content = f"{pre_magic}\n{magic_cmd} {formatted_sql}"
-                    else:
-                        new_content = f"{magic_cmd} {formatted_sql}"
-                cell.source = new_content
-            except SQLFormattingError:
-                pass
-            continue
-
-        try:
-            tree = ast.parse(original_code)
-            line_offsets = build_line_offsets(original_code)
-            formatter = SQLStringFormatter(config, dialect, logger, line_offsets)
-            formatter.visit(tree)
-            if formatter.replacements:
-                result = original_code
-                for rep in sorted(
-                    formatter.replacements,
-                    key=lambda r: r.start_offset,
-                    reverse=True,
-                ):
-                    result = (
-                        result[: rep.start_offset]
-                        + rep.new_text
-                        + result[rep.end_offset :]
-                    )
-                cell.source = result
-        except SyntaxError:
-            continue
+    _format_cells(formatted_nb, config, dialect, logger)
 
     # Build unified diff cell-by-cell
     diff_lines = []
@@ -665,8 +619,8 @@ def diff_notebook(
                 difflib.unified_diff(
                     orig_cell.source.splitlines(keepends=True),
                     fmt_cell.source.splitlines(keepends=True),
-                    fromfile=f"Cell [{i}] original",
-                    tofile=f"Cell [{i}] formatted",
+                    fromfile=f"{notebook_path} Cell [{i}] original",
+                    tofile=f"{notebook_path} Cell [{i}] formatted",
                 )
             )
     return "".join(diff_lines)
@@ -715,30 +669,27 @@ def main():
         sys.exit(1)
 
     try:
-        changed = False
         changed_files = []
 
         for notebook in args.notebooks:
-            if args.diff:
+            if args.check or args.diff:
+                # In check/diff mode, use diff_notebook to get both the
+                # diff output and whether changes are needed (single pass).
                 diff_output = diff_notebook(notebook, config, args.dialect, logger)
-                if diff_output:
-                    print(diff_output, end="")
-                    changed = True
-                    changed_files.append(notebook)
+                needs_formatting = bool(diff_output)
 
-            if args.check:
-                if process_notebook(
-                    notebook, config, args.dialect, logger, check_only=True
-                ):
-                    changed = True
+                if args.diff and diff_output:
+                    print(diff_output, end="")
+
+                if needs_formatting:
                     changed_files.append(notebook)
-            elif not args.diff:
+            else:
+                # Normal mode: format in place
                 if process_notebook(notebook, config, args.dialect, logger):
-                    changed = True
                     changed_files.append(notebook)
 
         if args.check:
-            if changed:
+            if changed_files:
                 logger.error(f"{len(changed_files)} notebook(s) would be reformatted:")
                 for f in changed_files:
                     logger.error(f"  - {f}")
@@ -749,7 +700,7 @@ def main():
 
         # Print summary for normal mode
         if not args.diff:
-            if changed:
+            if changed_files:
                 logger.info("Changes made to the following notebooks:")
                 for file in changed_files:
                     logger.info(f"  - {file}")

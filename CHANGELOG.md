@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-03-15
+
+### Fixed
+
+- `diff_notebook()` no longer duplicates cell-processing logic — extracted shared `_format_cells()` helper to prevent future divergence
+- `--check --diff` combined mode no longer double-counts notebooks or processes them twice
+- Skip hint (`# sqlnbfmt: skip`) no longer triggers on string literals containing the directive — only dedicated comment lines are recognised
+- `load_config()` with a partial config file (missing keys) now falls back to built-in defaults instead of empty sets
+- `load_config()` with an empty YAML file no longer raises `AttributeError`
+- In-function SQL indentation now respects `indent_width` config instead of hardcoded 4 spaces
+
+### Added
+
+- `main()` integration tests for `--diff`, `--check`, and `--check --diff` exit code behavior
+- Docstring on `_has_skip_hint()` clarifying that inline trailing comments are intentionally ignored
+
 ## [0.3.0] - 2026-03-15
 
 ### Added
