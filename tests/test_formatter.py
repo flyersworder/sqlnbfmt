@@ -3,10 +3,6 @@ import nbformat
 from nbformat import v4 as nbf
 from pathlib import Path
 import logging
-import sys
-
-# Add the parent directory to sys.path to import the formatter module
-sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from sqlnbfmt.formatter import process_notebook, FormattingConfig, load_config
 
@@ -33,36 +29,17 @@ def logger():
     # Test Case 1: Simple SELECT Query
     (
         [nbf.new_code_cell("""query = "select id, name from users where active = 1" """)],
-        [nbf.new_code_cell('''query = """
-SELECT
-  id,
-  name
-FROM users
-WHERE
-  active = 1
-"""''')],
+        [nbf.new_code_cell('''query = """\nSELECT\n  id,\n  name\nFROM users\nWHERE\n  active = 1\n""" ''')],
     ),
     # Test Case 2: SELECT Query with F-String and Variable
     (
         [nbf.new_code_cell('''table_name = "users"\nquery = f"select * from {table_name}"''')],
-        [nbf.new_code_cell('''table_name = "users"
-query = f"""
-SELECT
-  *
-FROM {table_name}
-"""''')],
+        [nbf.new_code_cell('''table_name = "users"\nquery = f"""\nSELECT\n  *\nFROM {table_name}\n"""''')],
     ),
     # Test Case 3: Multi-line SELECT Query with Variables
     (
         [nbf.new_code_cell('''columns = "id, name"\nquery = f"select {columns} from users where active = 1"''')],
-        [nbf.new_code_cell('''columns = "id, name"
-query = f"""
-SELECT
-  {columns}
-FROM users
-WHERE
-  active = 1
-"""''')],
+        [nbf.new_code_cell('''columns = "id, name"\nquery = f"""\nSELECT\n  {columns}\nFROM users\nWHERE\n  active = 1\n"""''')],
     ),
     # Test Case 4: SQL Query with Line Magic Command
     (
@@ -72,52 +49,27 @@ WHERE
     # Test Case 5: SQL Query with Cell Magic Command
     (
         [nbf.new_code_cell('''%%sql\nselect * from users where active = 1''')],
-        [nbf.new_code_cell('''%%sql
-SELECT
-  *
-FROM users
-WHERE
-  active = 1''')],
+        [nbf.new_code_cell('''%%sql\nSELECT\n  *\nFROM users\nWHERE\n  active = 1''')],
     ),
     # Test Case 6: INSERT Query with Variables (Remains Unchanged)
     (
         [nbf.new_code_cell('''table_name = "users"\ncolumns = "(id, name)"\nvalues = "(1, 'Alice')"\nquery = f"insert into {table_name} {columns} values {values}"''')],
-        [nbf.new_code_cell('''table_name = "users"
-columns = "(id, name)"
-values = "(1, 'Alice')"
-query = f"insert into {table_name} {columns} values {values}"''')],
+        [nbf.new_code_cell('''table_name = "users"\ncolumns = "(id, name)"\nvalues = "(1, 'Alice')"\nquery = f"insert into {table_name} {columns} values {values}"''')],
     ),
     # Test Case 7: UPDATE Query with Variables
     (
         [nbf.new_code_cell('''table_name = "users"\nquery = f"update {table_name} set active = 0 where id = 1"''')],
-        [nbf.new_code_cell('''table_name = "users"
-query = f"""
-UPDATE {table_name} SET active = 0
-WHERE
-  id = 1
-"""''')],
+        [nbf.new_code_cell('''table_name = "users"\nquery = f"""\nUPDATE {table_name} SET active = 0\nWHERE\n  id = 1\n"""''')],
     ),
     # Test Case 8: DELETE Query
     (
         [nbf.new_code_cell("""query = "delete from users where active = 0" """)],
-        [nbf.new_code_cell('''query = """
-DELETE FROM users
-WHERE
-  active = 0
-"""''')],
+        [nbf.new_code_cell('''query = """\nDELETE FROM users\nWHERE\n  active = 0\n""" ''')],
     ),
-    # Test Case 9: Query with Comments
+    # Test Case 9: Query with SQL Comments
     (
         [nbf.new_code_cell('''query = "-- Select active users\\nselect id, name from users where active = 1"''')],
-        [nbf.new_code_cell('''query = """
-/* Select active users */
-SELECT
-  id,
-  name
-FROM users
-WHERE
-  active = 1
-"""''')],
+        [nbf.new_code_cell('''query = """\n/* Select active users */\nSELECT\n  id,\n  name\nFROM users\nWHERE\n  active = 1\n"""''')],
     ),
     # Test Case 10: Non-SQL String (Should Remain Unchanged)
     (
@@ -127,50 +79,27 @@ WHERE
     # Test Case 11: F-string without variables
     (
         [nbf.new_code_cell('''query = f"select id, name from users where active = 1"''')],
-        [nbf.new_code_cell('''query = f"""
-SELECT
-  id,
-  name
-FROM users
-WHERE
-  active = 1
-"""''')],
+        [nbf.new_code_cell('''query = f"""\nSELECT\n  id,\n  name\nFROM users\nWHERE\n  active = 1\n"""''')],
     ),
     # Test Case 12: F-string with only string constants
     (
         [nbf.new_code_cell('''query = f"select " f"id, name " f"from users"''')],
-        [nbf.new_code_cell('''query = f"""
-SELECT
-  id,
-  name
-FROM users
-"""''')],
+        [nbf.new_code_cell('''query = f"""\nSELECT\n  id,\n  name\nFROM users\n"""''')],
     ),
     # Test Case 13: In-function SQL Query
     (
         [nbf.new_code_cell('''pd.read_sql("""select id, name from users where active = 1""")''')],
-        [nbf.new_code_cell('''pd.read_sql(
-    """
-    SELECT
-      id,
-      name
-    FROM users
-    WHERE
-      active = 1
-    """
-)''')],
+        [nbf.new_code_cell('''pd.read_sql(\n    """\n    SELECT\n      id,\n      name\n    FROM users\n    WHERE\n      active = 1\n    """\n)''')],
     ),
     # Test Case 14: In-function SQL Query with F-String
     (
         [nbf.new_code_cell('''table_name = "users"\npd.read_sql(f"select * from {table_name}")''')],
-        [nbf.new_code_cell('''table_name = "users"
-pd.read_sql(
-    f"""
-    SELECT
-      *
-    FROM {table_name}
-    """
-)''')],
+        [nbf.new_code_cell('''table_name = "users"\npd.read_sql(\n    f"""\n    SELECT\n      *\n    FROM {table_name}\n    """\n)''')],
+    ),
+    # Test Case 15: Python comment preservation
+    (
+        [nbf.new_code_cell('''# This query fetches active users\nquery = "select id, name from users where active = 1"''')],
+        [nbf.new_code_cell('''# This query fetches active users\nquery = """\nSELECT\n  id,\n  name\nFROM users\nWHERE\n  active = 1\n"""''')],
     ),
 ])
 def test_sql_formatter(temp_nb_path, logger, input_cells, expected_cells):
