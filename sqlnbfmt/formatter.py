@@ -10,7 +10,7 @@ from typing import Set, Optional, Dict, Union, Tuple
 
 import nbformat
 import yaml
-from sqlglot import parse_one, errors
+from sqlglot import parse, errors
 
 DEFAULT_SQL_KEYWORDS = frozenset(
     {
@@ -206,10 +206,18 @@ def format_sql_code(
         temp_sql = temp_sql.strip()
 
         # Parse and format SQL
-        parsed = parse_one(temp_sql, read=dialect)
-        formatted_sql = parsed.sql(
-            pretty=not force_single_line, indent=config.indent_width, dialect=dialect
-        )
+        statements = parse(temp_sql, read=dialect)
+        formatted_parts = []
+        for stmt in statements:
+            formatted_parts.append(
+                stmt.sql(
+                    pretty=not force_single_line,
+                    indent=config.indent_width,
+                    dialect=dialect,
+                )
+            )
+        separator = "; " if force_single_line else ";\n"
+        formatted_sql = separator.join(formatted_parts)
 
         # Apply formatting based on context
         if is_magic_command and not is_cell_magic:

@@ -223,6 +223,20 @@ def non_sql_unchanged():
     return nb
 
 
+def multi_statement():
+    """Multiple SQL statements separated by semicolons — each on its own line."""
+    nb = nbf.new_notebook()
+    nb.cells = [
+        nbf.new_code_cell(
+            "%%sql\n"
+            "DROP TABLE IF EXISTS Contract; DROP TABLE IF EXISTS Permanent; "
+            "CREATE TABLE Employee (eid INT, name VARCHAR(80) NOT NULL, PRIMARY KEY (eid)); "
+            "CREATE TABLE Department (did INT, name VARCHAR(30) NOT NULL, PRIMARY KEY (did))"
+        ),
+    ]
+    return nb
+
+
 def skip_hint():
     """Cell with # sqlnbfmt: skip — must remain untouched."""
     nb = nbf.new_notebook()
@@ -259,6 +273,7 @@ CASES = {
     "in_function_sql": in_function_sql,
     "idempotency": idempotency,
     "non_sql_unchanged": non_sql_unchanged,
+    "multi_statement": multi_statement,
     "skip_hint": skip_hint,
 }
 

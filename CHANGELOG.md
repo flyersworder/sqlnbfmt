@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-03-16
+
+### Fixed
+
+- Multiple SQL statements in a single cell are no longer concatenated on one line — each statement now starts on its own line after the `;` separator ([#3](https://github.com/flyersworder/sqlnbfmt/issues/3))
+
+### Changed
+
+- SQL parsing switched from `sqlglot.parse_one()` to `sqlglot.parse()` to correctly handle multi-statement inputs
+
+### Added
+
+- `multi_statement` eval fixture case covering `DROP TABLE` + `CREATE TABLE` sequences
+
 ## [0.3.1] - 2026-03-15
 
 ### Fixed
