@@ -1,6 +1,7 @@
 # sqlnbfmt
 
 [![PyPI](https://img.shields.io/pypi/v/sqlnbfmt.svg)](https://pypi.org/project/sqlnbfmt/)
+[![Tests](https://github.com/flyersworder/sqlnbfmt/actions/workflows/ci-and-publish.yml/badge.svg)](https://github.com/flyersworder/sqlnbfmt/actions/workflows/ci-and-publish.yml)
 [![License](https://img.shields.io/pypi/l/sqlnbfmt.svg)](https://github.com/flyersworder/sqlnbfmt/blob/main/LICENSE)
 [![Python Versions](https://img.shields.io/pypi/pyversions/sqlnbfmt.svg)](https://pypi.org/project/sqlnbfmt/)
 
