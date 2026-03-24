@@ -9,9 +9,27 @@
 
 - id: sqlnbfmt-check
   name: SQL Notebook Formatter (check)
-  description: Check SQL formatting without modifying files
+  description: Check SQL formatting in Jupyter notebooks without modifying files
   entry: sqlnbfmt --check
   language: python
   types: [jupyter]
+  require_serial: true
+  minimum_pre_commit_version: '3.0.0'
+
+- id: sqlnbfmt-py
+  name: SQL Python File Formatter
+  description: Format SQL queries in Python files (e.g. Marimo notebooks)
+  entry: sqlnbfmt
+  language: python
+  types: [python]
+  require_serial: true
+  minimum_pre_commit_version: '3.0.0'
+
+- id: sqlnbfmt-py-check
+  name: SQL Python File Formatter (check)
+  description: Check SQL formatting in Python files without modifying files
+  entry: sqlnbfmt --check
+  language: python
+  types: [python]
   require_serial: true
   minimum_pre_commit_version: '3.0.0'

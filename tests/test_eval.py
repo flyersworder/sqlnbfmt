@@ -1,7 +1,8 @@
 """Fixture-based eval test suite for sqlnbfmt.
 
 Auto-discovers test cases from tests/eval/*/ directories.
-Each directory must contain input.ipynb and expected.ipynb.
+Jupyter cases: input.ipynb + expected.ipynb.
+Marimo/Python cases: input.py + expected.py.
 """
 
 import logging
@@ -11,7 +12,7 @@ from pathlib import Path
 import nbformat
 import pytest
 
-from sqlnbfmt.formatter import load_config, process_notebook
+from sqlnbfmt.formatter import load_config, process_notebook, process_python_file
 
 EVAL_DIR = Path(__file__).resolve().parent / "eval"
 DIALECT = "mysql"
@@ -78,3 +79,35 @@ def test_eval(case_name, logger, tmp_path):
             f"Expected:\n{exp_cell.source}\n"
             f"Actual:\n{fmt_cell.source}"
         )
+
+
+def discover_marimo_eval_cases():
+    """Find eval case directories containing input.py + expected.py."""
+    if not EVAL_DIR.is_dir():
+        return []
+    cases = []
+    for case_dir in sorted(EVAL_DIR.iterdir()):
+        if (
+            case_dir.is_dir()
+            and (case_dir / "input.py").exists()
+            and (case_dir / "expected.py").exists()
+        ):
+            cases.append(case_dir.name)
+    return cases
+
+
+@pytest.mark.parametrize("case_name", discover_marimo_eval_cases(), ids=lambda c: c)
+def test_marimo_eval(case_name, logger, tmp_path):
+    """Run formatter on input.py and compare with expected.py."""
+    case_dir = EVAL_DIR / case_name
+    work_path = tmp_path / "notebook.py"
+    shutil.copy2(case_dir / "input.py", work_path)
+
+    config = load_config()
+    process_python_file(work_path, config, DIALECT, logger)
+
+    formatted = work_path.read_text()
+    expected = (case_dir / "expected.py").read_text()
+    assert formatted == expected, (
+        f"[{case_name}] Content mismatch.\nExpected:\n{expected}\nActual:\n{formatted}"
+    )

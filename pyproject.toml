@@ -1,14 +1,14 @@
 [project]
 name = "sqlnbfmt"
-version = "0.3.2"
-description = "A tool to format SQL code in Jupyter notebooks."
+version = "0.4.0"
+description = "A tool to format SQL code in Jupyter notebooks and Marimo notebooks."
 authors = [
   { name = "Qing", email = "qingye779@gmail.com" }
 ]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.12"
-keywords = ["sql", "jupyter", "notebook", "formatter", "sqlglot", "pre-commit"]
+keywords = ["sql", "jupyter", "marimo", "notebook", "formatter", "sqlglot", "pre-commit"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

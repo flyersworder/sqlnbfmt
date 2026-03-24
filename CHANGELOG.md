@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - Unreleased
+
+### Added
+
+- **Marimo notebook support**: format SQL in Marimo `.py` notebooks via `mo.sql()` calls — same `sqlnbfmt` command, auto-detected by file extension
+- **Python file support**: `sqlnbfmt` now accepts `.py` files alongside `.ipynb` — works on any Python file containing SQL strings
+- `_format_python_source()`, `process_python_file()`, `diff_python_file()` public API for programmatic use
+- `sql` added to default recognized function names (matches `mo.sql()`, etc.)
+- `sqlnbfmt-py` and `sqlnbfmt-py-check` pre-commit hooks for Python files
+- Marimo eval fixtures: `marimo_basic_sql`, `marimo_fstring_interpolation`, `marimo_complex_sql`, `marimo_multi_cell_mixed`, `marimo_comment_preservation`, `marimo_multi_statement`, `marimo_skip_hint`, `marimo_non_sql_unchanged`, `marimo_idempotency`
+
+### Fixed
+
+- Idempotency: already-formatted SQL in triple-quoted strings (with leading whitespace/indentation) is no longer re-formatted on every run
+
+### Changed
+
+- CLI description and help text updated to reflect multi-format support
+- Project description and keywords updated for Marimo discoverability
+
 ## [0.3.2] - 2026-03-16
 
 ### Fixed

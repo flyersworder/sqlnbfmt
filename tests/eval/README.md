@@ -1,15 +1,15 @@
 # Eval Test Suite
 
-Fixture-based evaluation tests for `sqlnbfmt`. Each test case is a directory containing paired notebooks:
+Fixture-based evaluation tests for `sqlnbfmt`. Each test case is a directory containing paired files:
 
 ```
 tests/eval/
 ├── basic_select/
-│   ├── input.ipynb      # Unformatted notebook
+│   ├── input.ipynb      # Unformatted Jupyter notebook
 │   └── expected.ipynb   # Expected formatter output
-├── joins/
-│   ├── input.ipynb
-│   └── expected.ipynb
+├── marimo_basic_sql/
+│   ├── input.py         # Unformatted Marimo/Python file
+│   └── expected.py      # Expected formatter output
 └── ...
 ```
 
@@ -17,9 +17,8 @@ tests/eval/
 
 `test_eval.py` auto-discovers all `tests/eval/*/` directories. For each case it:
 
-1. Copies `input.ipynb` to a temp directory
-2. Runs `process_notebook()` on the copy
-3. Compares the result cell-by-cell against `expected.ipynb`
+- **Jupyter cases** (`input.ipynb` + `expected.ipynb`): copies `input.ipynb` to a temp directory, runs `process_notebook()`, compares cell-by-cell against `expected.ipynb`
+- **Marimo/Python cases** (`input.py` + `expected.py`): copies `input.py` to a temp directory, runs `process_python_file()`, compares full file content against `expected.py`
 
 ## Adding a new eval case
 
@@ -89,3 +88,16 @@ uv run pytest tests/test_eval.py -v
 | `in_function_sql` | SQL inside `pd.read_sql()`, `execute()` |
 | `idempotency` | Already-formatted input unchanged |
 | `non_sql_unchanged` | Pure Python cells untouched |
+
+### Marimo Scenarios
+| Case | Description |
+|------|-------------|
+| `marimo_basic_sql` | `mo.sql()` with simple SELECT |
+| `marimo_fstring_interpolation` | `mo.sql()` with f-string `{expr}` placeholders preserved |
+| `marimo_complex_sql` | CTE + JOIN + GROUP BY + window function in `mo.sql()` |
+| `marimo_multi_cell_mixed` | SQL and non-SQL cells mixed; only SQL cells touched |
+| `marimo_comment_preservation` | Python comments in cells survive formatting |
+| `marimo_multi_statement` | Multiple SQL statements in one `mo.sql()` call |
+| `marimo_skip_hint` | `# sqlnbfmt: skip` prevents formatting of entire file |
+| `marimo_non_sql_unchanged` | Pure Python cells produce no changes |
+| `marimo_idempotency` | Already-formatted output unchanged on re-run |

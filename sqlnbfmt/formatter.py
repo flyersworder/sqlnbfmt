@@ -4,6 +4,7 @@ import difflib
 import logging
 import re
 import sys
+import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Set, Optional, Dict, Union, Tuple
@@ -49,6 +50,7 @@ DEFAULT_FUNCTION_NAMES = frozenset(
         "fetchone",
         "fetchmany",
         "execute_query",
+        "sql",
     }
 )
 
@@ -359,7 +361,7 @@ class SQLStringFormatter(ast.NodeVisitor):
             except SQLFormattingError:
                 return None
 
-            if formatted_sql == sql_str:
+            if formatted_sql == textwrap.dedent(sql_str).strip():
                 return None
 
             # Restore placeholders as f-string expressions
@@ -574,6 +576,47 @@ def _format_cells(
     return changed
 
 
+def _format_python_source(
+    source: str,
+    config: FormattingConfig,
+    dialect: Optional[str],
+    logger: logging.Logger,
+) -> Tuple[str, bool]:
+    """Format SQL strings in Python source code.
+
+    Returns (formatted_source, changed) tuple.
+    """
+    if not source.strip():
+        return source, False
+
+    if _has_skip_hint(source):
+        return source, False
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        logger.warning("Failed to parse Python source")
+        return source, False
+
+    line_offsets = build_line_offsets(source)
+    formatter = SQLStringFormatter(config, dialect, logger, line_offsets)
+    formatter.visit(tree)
+
+    if not formatter.replacements:
+        return source, False
+
+    result = source
+    for rep in sorted(
+        formatter.replacements,
+        key=lambda r: r.start_offset,
+        reverse=True,
+    ):
+        result = result[: rep.start_offset] + rep.new_text + result[rep.end_offset :]
+
+    changed = result != source
+    return result, changed
+
+
 def process_notebook(
     notebook_path: Union[str, Path],
     config: FormattingConfig,
@@ -634,13 +677,69 @@ def diff_notebook(
     return "".join(diff_lines)
 
 
+def process_python_file(
+    file_path: Union[str, Path],
+    config: FormattingConfig,
+    dialect: Optional[str],
+    logger: logging.Logger,
+    check_only: bool = False,
+) -> bool:
+    """Processes a Python file (e.g. Marimo notebook).
+
+    Returns True if changes were made (or would be made in check mode).
+    """
+    try:
+        file_path = Path(file_path)
+        source = file_path.read_text(encoding="utf-8")
+        formatted, changed = _format_python_source(source, config, dialect, logger)
+
+        if changed and not check_only:
+            file_path.write_text(formatted, encoding="utf-8")
+            logger.info(f"Updated file: {file_path}")
+
+        return changed
+
+    except Exception as e:
+        logger.error(f"Failed to process file {file_path}: {e}", exc_info=True)
+        raise
+
+
+def diff_python_file(
+    file_path: Union[str, Path],
+    config: FormattingConfig,
+    dialect: Optional[str],
+    logger: logging.Logger,
+) -> str:
+    """Returns a unified diff of formatting changes for a Python file."""
+    file_path = Path(file_path)
+    source = file_path.read_text(encoding="utf-8")
+    formatted, _ = _format_python_source(source, config, dialect, logger)
+
+    if source == formatted:
+        return ""
+
+    return "".join(
+        difflib.unified_diff(
+            source.splitlines(keepends=True),
+            formatted.splitlines(keepends=True),
+            fromfile=f"{file_path} original",
+            tofile=f"{file_path} formatted",
+        )
+    )
+
+
 def main():
     """Main entry point for the SQL formatter."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Format SQL code in Jupyter notebooks")
+    parser = argparse.ArgumentParser(
+        description="Format SQL code in Jupyter notebooks and Python files"
+    )
     parser.add_argument(
-        "notebooks", nargs="+", type=Path, help="Notebook paths to process"
+        "files",
+        nargs="+",
+        type=Path,
+        help="Notebook (.ipynb) or Python (.py) file paths to process",
     )
     parser.add_argument(
         "--config", type=Path, default=None, help="Configuration file path (optional)"
@@ -679,41 +778,51 @@ def main():
     try:
         changed_files = []
 
-        for notebook in args.notebooks:
+        for file_path in args.files:
+            is_python = file_path.suffix == ".py"
+
             if args.check or args.diff:
-                # In check/diff mode, use diff_notebook to get both the
-                # diff output and whether changes are needed (single pass).
-                diff_output = diff_notebook(notebook, config, args.dialect, logger)
+                if is_python:
+                    diff_output = diff_python_file(
+                        file_path, config, args.dialect, logger
+                    )
+                else:
+                    diff_output = diff_notebook(file_path, config, args.dialect, logger)
                 needs_formatting = bool(diff_output)
 
                 if args.diff and diff_output:
                     print(diff_output, end="")
 
                 if needs_formatting:
-                    changed_files.append(notebook)
+                    changed_files.append(file_path)
             else:
-                # Normal mode: format in place
-                if process_notebook(notebook, config, args.dialect, logger):
-                    changed_files.append(notebook)
+                if is_python:
+                    changed = process_python_file(
+                        file_path, config, args.dialect, logger
+                    )
+                else:
+                    changed = process_notebook(file_path, config, args.dialect, logger)
+                if changed:
+                    changed_files.append(file_path)
 
         if args.check:
             if changed_files:
-                logger.error(f"{len(changed_files)} notebook(s) would be reformatted:")
+                logger.error(f"{len(changed_files)} file(s) would be reformatted:")
                 for f in changed_files:
                     logger.error(f"  - {f}")
                 sys.exit(1)
             else:
-                logger.info("All notebooks are properly formatted.")
+                logger.info("All files are properly formatted.")
                 sys.exit(0)
 
         # Print summary for normal mode
         if not args.diff:
             if changed_files:
-                logger.info("Changes made to the following notebooks:")
+                logger.info("Changes made to the following files:")
                 for file in changed_files:
                     logger.info(f"  - {file}")
             else:
-                logger.info("No changes needed. All notebooks are properly formatted.")
+                logger.info("No changes needed. All files are properly formatted.")
 
         sys.exit(0)
 

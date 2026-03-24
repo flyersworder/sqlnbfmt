@@ -7,14 +7,15 @@
 
 > **Quick start:** `pip install sqlnbfmt && sqlnbfmt notebook.ipynb`
 
-A SQL formatter designed specifically for Jupyter Notebooks. `sqlnbfmt` automatically formats SQL queries embedded in code cells, including both Python strings and SQL magic cells (`%%sql`), helping you maintain clean and consistent code.
+A SQL formatter for Jupyter Notebooks and Marimo notebooks. `sqlnbfmt` automatically formats SQL queries embedded in notebook cells — Python strings, SQL magic cells (`%%sql`), and Marimo `mo.sql()` calls — helping you maintain clean and consistent code.
 
 ## Features
 
 - **Zero-config**: Works out of the box with sensible defaults — no config file needed
-- **Smart SQL Detection**: Automatically identifies and formats SQL queries in code cells and magic SQL cells
+- **Jupyter + Marimo**: Formats SQL in `.ipynb` notebooks and Marimo `.py` notebooks
+- **Smart SQL Detection**: Automatically identifies and formats SQL queries in code cells, magic SQL cells, and `mo.sql()` calls
 - **AST-Powered**: Uses Abstract Syntax Tree parsing for accurate SQL string identification
-- **Safe Formatting**: Preserves Python comments, query parameters (e.g., `%s`, `?`), and SQL comments
+- **Safe Formatting**: Preserves Python comments, query parameters (e.g., `%s`, `?`), f-string placeholders, and SQL comments
 - **CI-Friendly**: `--check` mode exits non-zero when formatting is needed; `--diff` shows what would change
 - **Skip Hints**: Add `# sqlnbfmt: skip` to any cell to exclude it from formatting
 - **Pre-commit Ready**: Seamlessly integrates with pre-commit hooks
@@ -30,14 +31,24 @@ pip install sqlnbfmt
 
 ### Command Line
 
-Format a single notebook:
+Format Jupyter notebooks:
 ```bash
 sqlnbfmt path/to/your_notebook.ipynb
 ```
 
+Format Marimo notebooks (or any Python file with SQL strings):
+```bash
+sqlnbfmt path/to/your_notebook.py
+```
+
+Mix both in a single invocation:
+```bash
+sqlnbfmt *.ipynb marimo_app.py
+```
+
 Check formatting without modifying files (useful in CI):
 ```bash
-sqlnbfmt --check path/to/your_notebook.ipynb
+sqlnbfmt --check path/to/your_notebook.ipynb path/to/marimo_app.py
 ```
 
 Show a diff of what would change:
@@ -47,7 +58,7 @@ sqlnbfmt --diff path/to/your_notebook.ipynb
 
 ### Skipping Cells
 
-Add a `# sqlnbfmt: skip` comment anywhere in a cell to skip formatting:
+Add a `# sqlnbfmt: skip` comment to skip formatting. In Jupyter notebooks this applies per-cell; in Python files it applies to the entire file.
 
 ```python
 # sqlnbfmt: skip
@@ -65,10 +76,16 @@ pip install pre-commit
 ```yaml
 repos:
   - repo: https://github.com/flyersworder/sqlnbfmt
-    rev: v0.3.0
+    rev: v0.4.0
     hooks:
       - id: sqlnbfmt
         types: [jupyter]
+```
+
+To also format Marimo notebooks (Python files), add the Python hook:
+```yaml
+      - id: sqlnbfmt-py
+        files: '\.py$'  # optionally narrow with: files: 'marimo_.*\.py$'
 ```
 
 All arguments are optional. To specify a dialect or custom config:
@@ -95,6 +112,7 @@ Use `--check` in GitHub Actions to enforce formatting:
   run: |
     pip install sqlnbfmt
     sqlnbfmt --check **/*.ipynb
+    sqlnbfmt --check marimo_*.py  # if using Marimo
 ```
 
 ## Configuration
@@ -113,7 +131,9 @@ Create a `config.yaml` file to customize formatting behavior. [Here](https://git
 | `single_line_threshold` | Maximum length before splitting SQL | 80 |
 | `indent_width` | Number of spaces for indentation | 4 |
 
-## Example
+## Examples
+
+### Jupyter Notebook
 
 Before formatting:
 ```python
@@ -136,6 +156,35 @@ WHERE
 ORDER BY
   a.created_at DESC
 """)
+```
+
+### Marimo Notebook
+
+Before formatting:
+```python
+@app.cell
+def _(mo):
+    _df = mo.sql(f"select id, name from users where active = 1 order by name")
+    return
+```
+
+After formatting:
+```python
+@app.cell
+def _(mo):
+    _df = mo.sql(
+    f"""
+    SELECT
+      id,
+      name
+    FROM users
+    WHERE
+      active = 1
+    ORDER BY
+      name
+    """
+)
+    return
 ```
 
 ## Troubleshooting
