@@ -3,7 +3,7 @@
 Provides a formatter plugin for jupyterlab-code-formatter that formats
 SQL in notebook cells (both magic commands and Python strings).
 
-Setup: add this to your ``jupyter_notebook_config.py``::
+Setup: add this to your ``jupyter_server_config.py``::
 
     from sqlnbfmt.jupyterlab_integration import register
     register()
@@ -54,7 +54,7 @@ def register(
 ) -> None:
     """Register sqlnbfmt with jupyterlab-code-formatter.
 
-    Call this in ``jupyter_notebook_config.py``::
+    Call this in ``jupyter_server_config.py``::
 
         from sqlnbfmt.jupyterlab_integration import register
         register()                       # defaults

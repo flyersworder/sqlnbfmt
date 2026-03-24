@@ -75,7 +75,7 @@ Format SQL cells interactively with [jupyterlab-code-formatter](https://github.c
 pip install sqlnbfmt jupyterlab-code-formatter
 ```
 
-2. Register the formatter in `~/.jupyter/jupyter_notebook_config.py`:
+2. Register the formatter in `~/.jupyter/jupyter_server_config.py`:
 ```python
 from sqlnbfmt.jupyterlab_integration import register
 register()                       # or: register(dialect="postgres")
