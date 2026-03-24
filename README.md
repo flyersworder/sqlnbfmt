@@ -19,6 +19,7 @@ A SQL formatter for Jupyter Notebooks and Marimo notebooks. `sqlnbfmt` automatic
 - **CI-Friendly**: `--check` mode exits non-zero when formatting is needed; `--diff` shows what would change
 - **Skip Hints**: Add `# sqlnbfmt: skip` to any cell to exclude it from formatting
 - **Pre-commit Ready**: Seamlessly integrates with pre-commit hooks
+- **JupyterLab Plugin**: Works with `jupyterlab-code-formatter` for interactive format-on-save
 - **Lightweight**: Only three runtime dependencies (sqlglot, nbformat, pyyaml)
 
 ## Installation
@@ -64,6 +65,23 @@ Add a `# sqlnbfmt: skip` comment to skip formatting. In Jupyter notebooks this a
 # sqlnbfmt: skip
 query = "select * from my_special_table where id = 1"
 ```
+
+### JupyterLab Integration
+
+Format SQL cells interactively with [jupyterlab-code-formatter](https://github.com/jupyterlab-contrib/jupyterlab_code_formatter):
+
+1. Install both packages:
+```bash
+pip install sqlnbfmt jupyterlab-code-formatter
+```
+
+2. Register the formatter in `~/.jupyter/jupyter_notebook_config.py`:
+```python
+from sqlnbfmt.jupyterlab_integration import register
+register()                       # or: register(dialect="postgres")
+```
+
+3. In JupyterLab, use **Edit > Format Cell** or configure format-on-save in Settings > Code Formatter.
 
 ### Pre-commit Integration
 

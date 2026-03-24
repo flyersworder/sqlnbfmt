@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Marimo notebook support**: format SQL in Marimo `.py` notebooks via `mo.sql()` calls — same `sqlnbfmt` command, auto-detected by file extension
 - **Python file support**: `sqlnbfmt` now accepts `.py` files alongside `.ipynb` — works on any Python file containing SQL strings
+- **JupyterLab integration**: `sqlnbfmt.jupyterlab_integration.register()` for use with `jupyterlab-code-formatter`
+- `format_cell_source()` public API for formatting a single cell's source code
 - `_format_python_source()`, `process_python_file()`, `diff_python_file()` public API for programmatic use
 - `sql` added to default recognized function names (matches `mo.sql()`, etc.)
 - `sqlnbfmt-py` and `sqlnbfmt-py-check` pre-commit hooks for Python files

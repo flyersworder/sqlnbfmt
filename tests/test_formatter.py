@@ -3,7 +3,12 @@ import nbformat
 from nbformat import v4 as nbf
 import logging
 
-from sqlnbfmt.formatter import process_notebook, load_config, diff_notebook
+from sqlnbfmt.formatter import (
+    format_cell_source,
+    process_notebook,
+    load_config,
+    diff_notebook,
+)
 
 
 # Fixture for temporary notebook path
@@ -461,3 +466,50 @@ def test_main_check_diff_exits_one(tmp_path):
     )
     assert result.returncode == 1
     assert "---" in result.stdout  # diff was printed
+
+
+# ---------------------------------------------------------------------------
+# format_cell_source tests
+# ---------------------------------------------------------------------------
+
+
+def test_format_cell_source_magic(logger):
+    """format_cell_source handles %%sql magic cells."""
+    config = load_config()
+    code = "%%sql\nselect id, name from users where active = 1"
+    result = format_cell_source(code, config, "mysql", logger)
+    assert result.startswith("%%sql\n")
+    assert "SELECT" in result
+
+
+def test_format_cell_source_line_magic(logger):
+    """format_cell_source handles %sql line magic."""
+    config = load_config()
+    code = "%sql select * from users where active = 1"
+    result = format_cell_source(code, config, "mysql", logger)
+    assert result.startswith("%sql ")
+    assert "SELECT" in result
+
+
+def test_format_cell_source_python(logger):
+    """format_cell_source handles regular Python code with SQL."""
+    config = load_config()
+    code = 'query = "select id, name from users where active = 1"'
+    result = format_cell_source(code, config, "mysql", logger)
+    assert "SELECT" in result
+
+
+def test_format_cell_source_non_sql(logger):
+    """format_cell_source returns non-SQL code unchanged."""
+    config = load_config()
+    code = "x = 42\nprint(x)"
+    result = format_cell_source(code, config, "mysql", logger)
+    assert result == code
+
+
+def test_format_cell_source_skip_hint(logger):
+    """format_cell_source respects skip hints."""
+    config = load_config()
+    code = '# sqlnbfmt: skip\nquery = "select * from users"'
+    result = format_cell_source(code, config, "mysql", logger)
+    assert result == code

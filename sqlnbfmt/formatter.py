@@ -457,6 +457,100 @@ def _has_skip_hint(source: str) -> bool:
     )
 
 
+def format_cell_source(
+    code: str,
+    config: FormattingConfig,
+    dialect: Optional[str],
+    logger: logging.Logger,
+) -> str:
+    """Format SQL in a single cell's source code.
+
+    Handles both magic commands (%%sql, %sql) and regular Python code
+    with embedded SQL strings. Returns the formatted source.
+    """
+    if not code.strip():
+        return code
+
+    if _has_skip_hint(code):
+        return code
+
+    lines = code.split("\n")
+
+    # Look for magic commands
+    magic_cmd = None
+    magic_cmd_index = None
+
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        if stripped.startswith("%%sql") or stripped.startswith("%sql"):
+            magic_cmd = stripped.split()[0]
+            magic_cmd_index = idx
+            break
+        else:
+            break
+
+    if magic_cmd:
+        is_cell_magic = magic_cmd.startswith("%%sql")
+
+        if is_cell_magic:
+            sql_code = "\n".join(lines[magic_cmd_index + 1 :]).strip()
+        else:
+            sql_code = lines[magic_cmd_index][len(magic_cmd) :].strip()
+
+        try:
+            formatted_sql = format_sql_code(
+                sql_code,
+                dialect,
+                config,
+                is_magic_command=True,
+                is_cell_magic=is_cell_magic,
+            )
+
+            if is_cell_magic:
+                pre_magic = "\n".join(lines[:magic_cmd_index])
+                if pre_magic:
+                    return f"{pre_magic}\n{magic_cmd}\n{formatted_sql}"
+                return f"{magic_cmd}\n{formatted_sql}"
+            else:
+                pre_magic = "\n".join(lines[:magic_cmd_index])
+                if pre_magic:
+                    return f"{pre_magic}\n{magic_cmd} {formatted_sql}"
+                return f"{magic_cmd} {formatted_sql}"
+
+        except SQLFormattingError as e:
+            logger.warning(f"SQL magic formatting skipped: {e}")
+            return code
+
+    # Handle regular Python code with surgical string replacement
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        logger.warning(f"Failed to parse cell:\n{code}")
+        return code
+
+    line_offsets = build_line_offsets(code)
+    formatter = SQLStringFormatter(config, dialect, logger, line_offsets)
+    formatter.visit(tree)
+
+    if not formatter.replacements:
+        return code
+
+    result = code
+    for rep in sorted(
+        formatter.replacements,
+        key=lambda r: r.start_offset,
+        reverse=True,
+    ):
+        result = result[: rep.start_offset] + rep.new_text + result[rep.end_offset :]
+
+    return result
+
+
 def _format_cells(
     notebook: nbformat.NotebookNode,
     config: FormattingConfig,
@@ -466,112 +560,15 @@ def _format_cells(
     """Format cells in-place. Returns True if any cell was modified."""
     changed = False
 
-    for cell_index, cell in enumerate(notebook.cells):
+    for cell in notebook.cells:
         if cell.cell_type != "code":
             continue
 
         original_code = cell.source
-        if not original_code.strip():
-            continue
-
-        if _has_skip_hint(original_code):
-            logger.debug(f"[Cell {cell_index}] Skipping cell (sqlnbfmt: skip)")
-            continue
-
-        lines = original_code.split("\n")
-
-        # Initialize variables to track magic commands
-        magic_cmd = None
-        magic_cmd_index = None
-
-        # Iterate through lines to find the first non-comment magic command
-        for idx, line in enumerate(lines):
-            stripped = line.strip()
-
-            if not stripped:
-                continue  # Skip empty lines
-
-            if stripped.startswith("#"):
-                continue  # Skip comment lines
-
-            if stripped.startswith("%%sql") or stripped.startswith("%sql"):
-                magic_cmd = stripped.split()[0]
-                magic_cmd_index = idx
-                break  # Magic command found
-
-            else:
-                break  # Non-magic, non-comment line found
-
-        if magic_cmd:
-            is_cell_magic = magic_cmd.startswith("%%sql")
-
-            if is_cell_magic:
-                # Cell magic: SQL code starts from the next line
-                sql_code = "\n".join(lines[magic_cmd_index + 1 :]).strip()
-            else:
-                # Line magic: SQL code is on the same line after the magic command
-                sql_code = lines[magic_cmd_index][len(magic_cmd) :].strip()
-
-            try:
-                formatted_sql = format_sql_code(
-                    sql_code,
-                    dialect,
-                    config,
-                    is_magic_command=True,
-                    is_cell_magic=is_cell_magic,
-                )
-
-                # Reconstruct the cell content
-                if is_cell_magic:
-                    # Preserve comments before the magic command
-                    pre_magic = "\n".join(lines[:magic_cmd_index])
-                    if pre_magic:
-                        new_content = f"{pre_magic}\n{magic_cmd}\n{formatted_sql}"
-                    else:
-                        new_content = f"{magic_cmd}\n{formatted_sql}"
-                else:
-                    # Preserve comments before the magic command
-                    pre_magic = "\n".join(lines[:magic_cmd_index])
-                    if pre_magic:
-                        new_content = f"{pre_magic}\n{magic_cmd} {formatted_sql}"
-                    else:
-                        new_content = f"{magic_cmd} {formatted_sql}"
-
-                if new_content != original_code:
-                    cell.source = new_content
-                    changed = True
-
-            except SQLFormattingError as e:
-                logger.warning(f"[Cell {cell_index}] SQL magic formatting skipped: {e}")
-
-            continue  # Move to the next cell after handling magic command
-
-        # Handle regular Python code with surgical string replacement
-        try:
-            tree = ast.parse(original_code)
-            line_offsets = build_line_offsets(original_code)
-            formatter = SQLStringFormatter(config, dialect, logger, line_offsets)
-            formatter.visit(tree)
-            if formatter.replacements:
-                result = original_code
-                for rep in sorted(
-                    formatter.replacements,
-                    key=lambda r: r.start_offset,
-                    reverse=True,
-                ):
-                    result = (
-                        result[: rep.start_offset]
-                        + rep.new_text
-                        + result[rep.end_offset :]
-                    )
-                if result != original_code:
-                    cell.source = result
-                    changed = True
-        except SyntaxError:
-            logger.warning(
-                f"[Cell {cell_index}] Failed to parse cell:\n{original_code}"
-            )
-            continue
+        formatted = format_cell_source(original_code, config, dialect, logger)
+        if formatted != original_code:
+            cell.source = formatted
+            changed = True
 
     return changed
 
