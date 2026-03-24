@@ -70,18 +70,17 @@ query = "select * from my_special_table where id = 1"
 
 Format SQL cells interactively with [jupyterlab-code-formatter](https://github.com/jupyterlab-contrib/jupyterlab_code_formatter):
 
-1. Install both packages:
 ```bash
 pip install sqlnbfmt jupyterlab-code-formatter
 ```
 
-2. Register the formatter in `~/.jupyter/jupyter_server_config.py`:
+That's it — sqlnbfmt auto-registers as a Jupyter server extension. In JupyterLab, use **Edit > Format Cell** or configure format-on-save in Settings > Code Formatter, and select "Apply SQL Notebook Formatter".
+
+To customize the dialect, add this to `~/.jupyter/jupyter_server_config.py`:
 ```python
 from sqlnbfmt.jupyterlab_integration import register
-register()                       # or: register(dialect="postgres")
+register(dialect="postgres")
 ```
-
-3. In JupyterLab, use **Edit > Format Cell** or configure format-on-save in Settings > Code Formatter.
 
 ### Pre-commit Integration
 
