@@ -49,8 +49,10 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 markers = [
-    "integration: mark a test as an integration test."
+    "integration: mark a test as an integration test.",
+    "live: end-to-end tests against the built wheel; slow, need uv, git and network (run with `pytest -m live`)",
 ]
+addopts = "-m 'not live'"
 
 [tool.hatch.build.targets.wheel.shared-data]
 "jupyter-config/sqlnbfmt.json" = "etc/jupyter/jupyter_server_config.d/sqlnbfmt.json"
