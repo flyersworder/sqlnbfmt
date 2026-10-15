@@ -7,6 +7,7 @@ import sys
 import textwrap
 import tomllib
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -96,6 +97,10 @@ class FormattingConfig:
 
 class SQLFormattingError(Exception):
     """Custom exception for SQL formatting errors."""
+
+
+class PlaceholderMovedError(SQLFormattingError):
+    """sqlglot would move or rewrap a query parameter or f-string field."""
 
 
 class ConfigError(ValueError):
@@ -314,11 +319,48 @@ def node_offsets(node: ast.AST, line_offsets: list, source: str) -> tuple[int, i
     )
 
 
+# DB-API / driver parameter styles: pyformat, format, qmark, named, numeric
+_PARAMETER = re.compile(r"%\(\w+\)s|%s|\?|(?<![:\w]):[A-Za-z_]\w*|\$\d+")
+_SQL_TOKEN = re.compile(r"[<>!=]+|\w+|[^\w\s]")
+_EQUIVALENT_TOKENS = {"!=": "<>", "==": "="}
+
+
+def _unique_prefix(text: str, base: str) -> str:
+    """``base``, extended until it doesn't occur in ``text`` (case-insensitively)."""
+    prefix = base
+    while prefix.lower() in text.lower():
+        prefix += "X"
+    return prefix
+
+
+def _stand_in_contexts(sql: str, stand_ins: list[str]) -> list[tuple[str, str, str]]:
+    """(stand-in, previous token, next token) for each stand-in, in order."""
+    if not stand_ins:
+        return []
+    pattern = re.compile(
+        "|".join(map(re.escape, sorted(stand_ins, key=len, reverse=True)))
+    )
+    tokens = [
+        _EQUIVALENT_TOKENS.get(token, token).upper()
+        for token in _SQL_TOKEN.findall(pattern.sub(lambda m: f" {m.group(0)} ", sql))
+    ]
+    upper_stand_ins = {token.upper() for token in stand_ins}
+    return [
+        (
+            token,
+            tokens[i - 1] if i > 0 else "",
+            tokens[i + 1] if i + 1 < len(tokens) else "",
+        )
+        for i, token in enumerate(tokens)
+        if token in upper_stand_ins
+    ]
+
+
 def format_sql_code(
     sql_code: str,
     dialect: str | None,
     config: FormattingConfig,
-    placeholders: dict[str, str] | None = None,
+    placeholders: Iterable[str] | None = None,
     force_single_line: bool = False,
     is_magic_command: bool = False,
     is_cell_magic: bool = False,
@@ -330,7 +372,9 @@ def format_sql_code(
         sql_code (str): The original SQL code to format.
         dialect (Optional[str]): The SQL dialect to use (e.g., 'postgres', 'mysql').
         config (FormattingConfig): The formatting configuration.
-        placeholders (Optional[Dict[str, str]]): A mapping of placeholders to their expressions.
+        placeholders (Optional[Iterable[str]]): Stand-in tokens for f-string fields
+            that are already present in ``sql_code`` (see extract_fstring_parts).
+            They come back unchanged; the caller restores the fields.
         force_single_line (bool): Whether to force the formatted SQL into a single line.
         is_magic_command (bool): Whether the SQL code comes from a magic command.
         is_cell_magic (bool): Whether the SQL code comes from a cell magic command.
@@ -346,17 +390,21 @@ def format_sql_code(
 
         temp_sql = sql_code
 
-        # Stand-ins for f-string fields ({...}, already PLACEHOLDER_n_ tokens) and
-        # DB-API parameters (%s, ?) are plain identifiers: every dialect prints
-        # those unchanged, whereas named parameters (:name) are rewritten per
-        # dialect (%(name)s, $name, @name). Trailing "_" keeps _1_ from being a
-        # prefix of _10_.
-        auto_placeholder_mapping = {}
-        for idx, match in enumerate(re.findall(r"%s|\?", temp_sql)):
-            temp_placeholder = f"AUTO_PLACEHOLDER_{idx}_"
-            temp_sql = temp_sql.replace(match, temp_placeholder, 1)
-            auto_placeholder_mapping[temp_placeholder] = match
-        stand_ins = [*(placeholders or {}), *auto_placeholder_mapping]
+        # Query parameters (%s, ?, %(name)s, :name, $1) and f-string fields
+        # (already replaced by the caller) are swapped for plain identifiers:
+        # every dialect prints those unchanged, whereas sqlglot rewrites
+        # parameters per dialect (%(name)s, $name, @name). The prefix never
+        # occurs in the SQL, so stand-ins can't collide with the user's text.
+        prefix = _unique_prefix(temp_sql, "SQLNBFMT_P")
+        parameters: dict[str, str] = {}
+
+        def stand_in(match: re.Match) -> str:
+            token = f"{prefix}{len(parameters)}_"
+            parameters[token] = match.group(0)
+            return token
+
+        temp_sql = _PARAMETER.sub(stand_in, temp_sql)
+        stand_ins = [*(placeholders or ()), *parameters]
 
         temp_sql = temp_sql.strip()
 
@@ -383,18 +431,19 @@ def format_sql_code(
         else:
             formatted_sql = formatted_sql.strip()
 
-        # Every stand-in must come back exactly as often as it went in
-        for token in stand_ins:
-            if formatted_sql.count(token) != temp_sql.count(token):
-                raise SQLFormattingError(
-                    f"placeholder {token} was altered by formatting; skipped"
-                )
-
-        # Restore DB-API parameters; f-string tokens are restored by the caller
-        for temp_placeholder, original_placeholder in auto_placeholder_mapping.items():
-            formatted_sql = formatted_sql.replace(
-                temp_placeholder, original_placeholder
+        # Parameters bind by position and fields can hold whole clauses, so each
+        # stand-in must keep its order and its neighbouring tokens; otherwise
+        # sqlglot moved it (LIMIT/OFFSET, TOP) or rewrapped it (FROM t AS {x}).
+        if _stand_in_contexts(formatted_sql, stand_ins) != _stand_in_contexts(
+            temp_sql, stand_ins
+        ):
+            raise PlaceholderMovedError(
+                "formatting would move or rewrap a query parameter or f-string field"
             )
+
+        # Restore query parameters; f-string fields are restored by the caller
+        for token, original in parameters.items():
+            formatted_sql = formatted_sql.replace(token, original)
 
         # Logging for debugging purposes
         logger.debug(f"Original SQL:\n{sql_code}")
@@ -402,6 +451,8 @@ def format_sql_code(
 
         return formatted_sql
 
+    except SQLFormattingError:
+        raise  # our own errors (e.g. PlaceholderMovedError) keep their type
     except errors.ParseError as e:
         raise SQLFormattingError(f"Failed to parse SQL code: {e}")
     except Exception as e:  # noqa: BLE001 - sqlglot raises many types; normalize them
@@ -409,14 +460,6 @@ def format_sql_code(
 
 
 _STRING_PREFIX = re.compile(r"[A-Za-z]*")
-_PLACEHOLDER_TOKEN = re.compile(r"(PLACEHOLDER_\d+_)")
-
-
-def _placeholder_source(value: ast.FormattedValue) -> str:
-    """Source of one ``{...}`` replacement field, with conversion and format spec."""
-    unparsed = ast.unparse(ast.JoinedStr(values=[value]))[1:]  # drop the "f"
-    quote = unparsed[:3] if unparsed[:3] in ('"""', "'''") else unparsed[0]
-    return unparsed[len(quote) : -len(quote)]
 
 
 def _normalize_template(parts: list[tuple[str, str]]) -> tuple:
@@ -552,15 +595,20 @@ class SQLStringFormatter(ast.NodeVisitor):
     def extract_fstring_parts(
         node: ast.JoinedStr,
     ) -> tuple[str, dict[str, ast.FormattedValue]]:
-        """The f-string's SQL with a token for each ``{...}``, and token -> node."""
+        """The f-string's SQL with a token for each ``{...}``, and token -> node.
+
+        Tokens are plain identifiers with a prefix that doesn't occur in the
+        f-string's text, and a trailing "_" so _1_ is not a prefix of _10_.
+        """
+        text = "".join(v.value for v in node.values if isinstance(v, ast.Constant))
+        prefix = _unique_prefix(text, "SQLNBFMT_F")
         sql_parts = []
         placeholders = {}
         for value in node.values:
             if isinstance(value, ast.Constant):
                 sql_parts.append(value.value)
             elif isinstance(value, ast.FormattedValue):
-                # Trailing "_" so _1_ is not a prefix of _10_
-                placeholder = f"PLACEHOLDER_{len(placeholders)}_"
+                placeholder = f"{prefix}{len(placeholders)}_"
                 sql_parts.append(placeholder)
                 placeholders[placeholder] = value
         return "".join(sql_parts), placeholders
@@ -570,8 +618,8 @@ class SQLStringFormatter(ast.NodeVisitor):
         node: ast.Constant | ast.JoinedStr,
         force_single_line: bool = False,
         block_indent: str | None = None,
-    ) -> str | None:
-        """Formats SQL code in AST nodes. Returns replacement text or None."""
+    ) -> tuple[str, tuple] | None:
+        """Formats SQL in a string literal: (replacement literal, template) or None."""
         try:
             placeholders = {}
 
@@ -594,6 +642,9 @@ class SQLStringFormatter(ast.NodeVisitor):
                     placeholders=placeholders or None,
                     force_single_line=force_single_line,
                 )
+            except PlaceholderMovedError as e:
+                self.logger.warning(f"line {node.lineno}: SQL formatting skipped: {e}")
+                return None
             except SQLFormattingError:
                 return None
 
@@ -671,9 +722,16 @@ class SQLStringFormatter(ast.NodeVisitor):
             return part
 
         body_parts, template_parts = [], []
-        for piece in _PLACEHOLDER_TOKEN.split(text) if is_fstring else [text]:
+        if placeholders:
+            token = re.compile("(" + "|".join(map(re.escape, placeholders)) + ")")
+            pieces = token.split(text)
+        else:
+            pieces = [text]
+        for piece in pieces:
             if piece in placeholders:
-                body_parts.append(_placeholder_source(placeholders[piece]))
+                # The field's own source, e.g. {d["k"]!r:>3}, copied verbatim
+                start, end = self._offsets(placeholders[piece])
+                body_parts.append(self.source[start:end])
                 template_parts.append(("expr", ast.dump(placeholders[piece])))
             else:
                 body_parts.append(escape(piece))

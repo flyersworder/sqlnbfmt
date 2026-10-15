@@ -53,7 +53,11 @@ def string_literals(tree):
 def sql_template(node):
     """The literal's SQL with stable markers for f-string fields and DB-API
     parameters, plus its sorted fields. Markers are named after the expression,
-    so dialect rewrites that reorder clauses (LIMIT -> TOP) still compare equal."""
+    so dialect rewrites that reorder clauses (LIMIT -> TOP) still compare equal.
+
+    Positional parameters (%s, ?) are indistinguishable after the fact, so this
+    can't see them being reordered; the formatter refuses to move them, which
+    test_moved_or_rewrapped_placeholders_are_left_alone checks directly."""
     if isinstance(node, ast.Constant):
         text, exprs = node.value, []
     else:
@@ -222,7 +226,7 @@ DIALECTS = [
     [
         'cursor.execute("select a, b from users where id = %s and c = 1", (1,))\n',
         'cursor.execute("select a, b from users where id = ? and c = 1", (1,))\n',
-        'q = f"select a, b from {table} where c = {value} limit {n}"\n',
+        'q = f"select a, b from {table} where c = {value} and d = {n}"\n',
         "q = f\"select a from {schema}.{table} where name = '{name}' and c = 1\"\n",
         # 12 parameters: AUTO_PLACEHOLDER_1_ must not clash with _10_
         'cursor.execute("insert into t values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)\n',
@@ -236,3 +240,75 @@ def test_parameters_survive_every_dialect(source, dialect):
     assert_same_meaning(source, formatted, dialect)
     for marker in ("%s", "?", "{table}", "{value}", "{n}", "{schema}", "'{name}'"):
         assert formatted.count(marker) == source.count(marker), marker
+
+
+# --- Placeholders must keep their place (#34 review) ----------------------
+
+
+@pytest.mark.parametrize(
+    ("source", "dialect"),
+    [
+        # A field holding a clause would get an alias: FROM t AS {where_clause}
+        ('q = f"SELECT * FROM t {where_clause}"\n', None),
+        ('q = f"SELECT * FROM t {join_clause} WHERE a = 1"\n', None),
+        # Positional parameters must not be reordered (they bind by position)
+        (
+            'cursor.execute("SELECT a FROM t WHERE x = %s OFFSET %s LIMIT %s", p)\n',
+            None,
+        ),
+        ('cursor.execute("SELECT a FROM t WHERE x = ? LIMIT ?", p)\n', "tsql"),
+    ],
+    ids=["clause-field", "join-field", "offset-limit", "tsql-top"],
+)
+def test_moved_or_rewrapped_placeholders_are_left_alone(source, dialect, caplog):
+    caplog.set_level(logging.WARNING)
+    assert fmt(source, dialect) == source
+    assert "SQL formatting skipped" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("dialect", "param"),
+    [
+        ("postgres", ":name"),
+        ("bigquery", ":name"),
+        ("duckdb", "%(name)s"),
+        ("postgres", "$1"),
+        (None, ":user_id"),
+    ],
+)
+def test_user_written_parameters_are_kept(dialect, param):
+    source = f'cursor.execute("select a, b from t where x = {param} and y = 1", p)\n'
+    formatted = fmt(source, dialect)
+    assert formatted != source
+    assert formatted.count(param) == 1
+
+
+@pytest.mark.parametrize(
+    "text", ["PLACEHOLDER_0_", "AUTO_PLACEHOLDER_0_", "SQLNBFMT_F0_", "SQLNBFMT_P0_"]
+)
+def test_sql_text_resembling_stand_ins_is_untouched(text):
+    for source in (
+        f"q = f\"select a from t where x = {{v}} and y = '{text}'\"\n",
+        f"cursor.execute(\"select a from t where note = '{text}' and x = ?\", p)\n",
+    ):
+        formatted = fmt(source)
+        assert_same_meaning(source, formatted)
+        assert formatted.count(text) == 1
+
+
+@pytest.mark.parametrize(
+    "field",
+    ['{d["k"]}', "{x if y else 'z'}", "{ {1: 2}[1] }", "{v!r:>3}", "{obj.attr}"],
+)
+def test_fstring_fields_keep_their_exact_source(field):
+    source = f'q = f"select a from t where b = {field} and c = 1"\n'
+    formatted = fmt(source)
+    assert formatted != source
+    assert field in formatted
+
+
+def test_not_equal_with_parameter_is_still_formatted():
+    source = 'cursor.execute("select a from t where b != %s and c = 1", p)\n'
+    formatted = fmt(source)
+    assert formatted != source
+    assert "%s" in formatted
