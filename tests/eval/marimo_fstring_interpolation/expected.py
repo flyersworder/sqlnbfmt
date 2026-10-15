@@ -14,14 +14,14 @@ def _():
 def _(mo):
     table = "users"
     _df = mo.sql(
-    f"""
-    SELECT
-      *
-    FROM {table}
-    WHERE
-      active = 1
-    """
-)
+        f"""
+        SELECT
+          *
+        FROM {table}
+        WHERE
+          active = 1
+        """
+    )
     return
 
 
@@ -29,17 +29,17 @@ def _(mo):
 def _(mo):
     min_age = 18
     _df = mo.sql(
-    f"""
-    SELECT
-      id,
-      name
-    FROM users
-    WHERE
-      age >= {min_age}
-    ORDER BY
-      name
-    """
-)
+        f"""
+        SELECT
+          id,
+          name
+        FROM users
+        WHERE
+          age >= {min_age}
+        ORDER BY
+          name
+        """
+    )
     return
 
 

@@ -384,12 +384,14 @@ class SQLStringFormatter(ast.NodeVisitor):
         dialect: str | None,
         logger: logging.Logger,
         line_offsets: list,
+        source: str,
     ):
         super().__init__()
         self.config = config
         self.dialect = dialect
         self.logger = logger
         self.line_offsets = line_offsets
+        self.source = source
         self.replacements: list = []
         self.changed = False
 
@@ -444,7 +446,7 @@ class SQLStringFormatter(ast.NodeVisitor):
         self,
         node: ast.Constant | ast.JoinedStr,
         force_single_line: bool = False,
-        in_function: bool = False,
+        block_indent: str | None = None,
     ) -> str | None:
         """Formats SQL code in AST nodes. Returns replacement text or None."""
         try:
@@ -485,7 +487,7 @@ class SQLStringFormatter(ast.NodeVisitor):
                     formatted_sql = formatted_sql.replace(ph, f"{{{expr}}}")
 
             self.changed = True
-            return self._build_replacement_text(formatted_sql, is_fstring, in_function)
+            return self._build_replacement_text(formatted_sql, is_fstring, block_indent)
 
         except SQLFormattingError as e:
             self.logger.warning(f"SQL formatting skipped: {e}")
@@ -495,16 +497,21 @@ class SQLStringFormatter(ast.NodeVisitor):
             return None
 
     def _build_replacement_text(
-        self, formatted_sql: str, is_fstring: bool, in_function: bool
+        self, formatted_sql: str, is_fstring: bool, block_indent: str | None
     ) -> str:
-        """Constructs the replacement string literal text."""
+        """Constructs the replacement string literal text.
+
+        With ``block_indent`` (SQL passed to a call), the SQL lines and closing
+        quotes are indented by it; where the block starts and what follows it is
+        decided by the caller, see ``_layout_call_argument``.
+        """
         prefix = "f" if is_fstring else ""
-        if in_function and "\n" in formatted_sql:
-            indent = " " * self.config.indent_width
+        if block_indent is not None and "\n" in formatted_sql:
             lines = formatted_sql.split("\n")
-            indented_lines = [indent + line if line.strip() else line for line in lines]
-            indented_sql = "\n".join(indented_lines)
-            return f'\n{indent}{prefix}"""\n{indented_sql}\n{indent}"""\n'
+            indented_sql = "\n".join(
+                block_indent + line if line.strip() else line for line in lines
+            )
+            return f'{prefix}"""\n{indented_sql}\n{block_indent}"""'
         elif "\n" in formatted_sql:
             return f'{prefix}"""\n{formatted_sql}\n"""'
         else:
@@ -523,25 +530,67 @@ class SQLStringFormatter(ast.NodeVisitor):
         """Handles function calls."""
         func_name = self.get_full_func_name(node.func)
         if any(name in func_name for name in self.config.function_names):
-            for arg in node.args:
-                if isinstance(arg, (ast.Constant, ast.JoinedStr)):
-                    replacement_text = self.format_sql_node(arg, in_function=True)
-                    if replacement_text:
-                        start, end = node_offsets(arg, self.line_offsets)
-                        self.replacements.append(
-                            SQLReplacement(start, end, replacement_text)
-                        )
-            for keyword in node.keywords:
-                if isinstance(keyword.value, (ast.Constant, ast.JoinedStr)):
-                    replacement_text = self.format_sql_node(
-                        keyword.value, in_function=True
-                    )
-                    if replacement_text:
-                        start, end = node_offsets(keyword.value, self.line_offsets)
-                        self.replacements.append(
-                            SQLReplacement(start, end, replacement_text)
-                        )
+            values = [*node.args, *(keyword.value for keyword in node.keywords)]
+            for value in values:
+                if isinstance(value, (ast.Constant, ast.JoinedStr)):
+                    self._replace_call_argument(node, value)
         self.generic_visit(node)
+
+    def _replace_call_argument(
+        self, call: ast.Call, arg: ast.Constant | ast.JoinedStr
+    ) -> None:
+        """Formats a SQL argument, indented relative to the line the call starts on."""
+        call_line_start = self.line_offsets[call.lineno - 1]
+        call_line = self.source[call_line_start:].partition("\n")[0]
+        base_indent = call_line[: len(call_line) - len(call_line.lstrip())]
+        block_indent = base_indent + " " * self.config.indent_width
+
+        replacement = self.format_sql_node(arg, block_indent=block_indent)
+        if not replacement:
+            return
+        start, end = node_offsets(arg, self.line_offsets)
+        if "\n" in replacement:
+            start, end, replacement = self._layout_call_argument(
+                start, end, replacement, base_indent, block_indent
+            )
+        self.replacements.append(SQLReplacement(start, end, replacement))
+
+    def _layout_call_argument(
+        self,
+        start: int,
+        end: int,
+        block: str,
+        base_indent: str,
+        block_indent: str,
+    ) -> tuple[int, int, str]:
+        """Places a multi-line SQL block within its call.
+
+        - Already on its own line: normalize that line's indentation.
+        - First thing after ``(``: break after the paren.
+        - Otherwise (after a keyword or another argument): open the quotes in
+          place and leave what follows (e.g. the closing paren) after the
+          closing quotes.
+
+        In the first two cases a directly following ``)`` moves to its own line at
+        the call's indentation; other arguments stay after the closing quotes, so
+        code outside the string is never rewritten beyond whitespace.
+        """
+        line_start = self.source.rfind("\n", 0, start) + 1
+        before = self.source[line_start:start]
+        if not before.strip():
+            start, block = line_start, block_indent + block
+        elif before.rstrip().endswith("("):
+            start -= len(before) - len(before.rstrip())
+            block = "\n" + block_indent + block
+        else:
+            return start, end, block
+
+        after = self.source[end:]
+        rest = after.lstrip(" \t")
+        if rest.startswith(")"):
+            end += len(after) - len(rest)
+            block += "\n" + base_indent
+        return start, end, block
 
     @staticmethod
     def get_full_func_name(node: ast.AST) -> str:
@@ -646,7 +695,7 @@ def format_cell_source(
         return code
 
     line_offsets = build_line_offsets(code)
-    formatter = SQLStringFormatter(config, dialect, logger, line_offsets)
+    formatter = SQLStringFormatter(config, dialect, logger, line_offsets, code)
     formatter.visit(tree)
 
     if not formatter.replacements:
@@ -708,7 +757,7 @@ def _format_python_source(
         return source, False
 
     line_offsets = build_line_offsets(source)
-    formatter = SQLStringFormatter(config, dialect, logger, line_offsets)
+    formatter = SQLStringFormatter(config, dialect, logger, line_offsets, source)
     formatter.visit(tree)
 
     if not formatter.replacements:

@@ -178,20 +178,20 @@ execute_sql("""SELECT a.col1, b.col2 FROM table_a a JOIN table_b b ON a.id = b.a
 
 After formatting:
 ```python
-execute_sql("""
-SELECT
-  a.col1,
-  b.col2
-FROM
-  table_a AS a
-JOIN
-  table_b AS b
-  ON a.id = b.a_id
-WHERE
-  a.status = 'active'
-ORDER BY
-  a.created_at DESC
-""")
+execute_sql(
+    """
+    SELECT
+      a.col1,
+      b.col2
+    FROM table_a AS a
+    JOIN table_b AS b
+      ON a.id = b.a_id
+    WHERE
+      a.status = 'active'
+    ORDER BY
+      a.created_at DESC
+    """
+)
 ```
 
 ### Marimo Notebook
@@ -209,17 +209,17 @@ After formatting:
 @app.cell
 def _(mo):
     _df = mo.sql(
-    f"""
-    SELECT
-      id,
-      name
-    FROM users
-    WHERE
-      active = 1
-    ORDER BY
-      name
-    """
-)
+        f"""
+        SELECT
+          id,
+          name
+        FROM users
+        WHERE
+          active = 1
+        ORDER BY
+          name
+        """
+    )
     return
 ```
 

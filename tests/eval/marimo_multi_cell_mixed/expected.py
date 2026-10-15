@@ -22,17 +22,17 @@ def _(pd):
 @app.cell
 def _(mo):
     _df = mo.sql(
-    f"""
-    SELECT
-      id,
-      name
-    FROM users
-    WHERE
-      active = 1
-    ORDER BY
-      name
-    """
-)
+        f"""
+        SELECT
+          id,
+          name
+        FROM users
+        WHERE
+          active = 1
+        ORDER BY
+          name
+        """
+    )
     return
 
 
@@ -48,17 +48,17 @@ def _():
 @app.cell
 def _(mo):
     result = mo.sql(
-    f"""
-    SELECT
-      department,
-      COUNT(*) AS cnt
-    FROM employees
-    GROUP BY
-      department
-    HAVING
-      COUNT(*) > 5
-    """
-)
+        f"""
+        SELECT
+          department,
+          COUNT(*) AS cnt
+        FROM employees
+        GROUP BY
+          department
+        HAVING
+          COUNT(*) > 5
+        """
+    )
     return (result,)
 
 

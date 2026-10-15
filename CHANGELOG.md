@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- SQL passed to a function call is now indented relative to the line the call is on, and a closing `)` or remaining arguments no longer land at column 0. This was most visible in Marimo cells, where every `mo.sql(...)` sits inside a function. It had regressed in 0.3.0, when the `black` post-processing pass was removed. Code already formatted by an earlier version keeps its layout until its SQL changes
+- The Jupyter server extension no longer overrides a formatter registered in `jupyter_server_config.py` (e.g. `register(dialect="postgres")`), and it now logs configuration errors instead of silently not registering
 - An unknown dialect (e.g. `--dialect postgress`) is now rejected with a suggestion. Previously every SQL string silently failed to parse, so `--check` reported all files as properly formatted
 - The `config.yaml` template was missing the `sql` function name (default since 0.4.0). Because config lists replace the defaults, copying the template silently disabled Marimo `mo.sql()` formatting. The README now states the replace semantics explicitly
 - Upgraded locked dependencies, including sqlglot 29 → 30 (formatting output unchanged across the eval suite)

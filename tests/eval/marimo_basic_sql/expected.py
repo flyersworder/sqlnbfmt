@@ -13,17 +13,17 @@ def _():
 @app.cell
 def _(mo):
     _df = mo.sql(
-    f"""
-    SELECT
-      id,
-      name
-    FROM users
-    WHERE
-      active = 1
-    ORDER BY
-      name
-    """
-)
+        f"""
+        SELECT
+          id,
+          name
+        FROM users
+        WHERE
+          active = 1
+        ORDER BY
+          name
+        """
+    )
     return
 
 
