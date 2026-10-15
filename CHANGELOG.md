@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`sql_decorators` now works.** The option was parsed and documented but never used by the formatter in any version ([#30](https://github.com/flyersworder/sqlnbfmt/issues/30)). SQL in decorator arguments (`@query("SELECT ...")`) and SQL returned from decorated functions (`@query` above `def f(): return "SELECT ..."`) is now formatted. Decorator names match like function names, and docstrings and returns of nested functions are left alone
 - `sql_keywords` entries are now case-insensitive. SQL detection compares against upper-cased code, so a lowercase entry such as `"merge"` was silently never matched
 - Blank entries in `sql_keywords`, `function_names` and `sql_decorators` (and their `extend_*` forms) are rejected. Function names match as substrings, so `""` matched every call
 
