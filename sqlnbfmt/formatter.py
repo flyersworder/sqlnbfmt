@@ -7,11 +7,10 @@ import sys
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Set, Optional, Dict, Union, Tuple
 
 import nbformat
 import yaml
-from sqlglot import parse, errors
+from sqlglot import errors, parse
 
 DEFAULT_SQL_KEYWORDS = frozenset(
     {
@@ -77,11 +76,11 @@ class SQLReplacement:
 class FormattingConfig:
     """Configuration for SQL formatting."""
 
-    sql_keywords: Set[str] = field(default_factory=lambda: set(DEFAULT_SQL_KEYWORDS))
-    function_names: Set[str] = field(
+    sql_keywords: set[str] = field(default_factory=lambda: set(DEFAULT_SQL_KEYWORDS))
+    function_names: set[str] = field(
         default_factory=lambda: set(DEFAULT_FUNCTION_NAMES)
     )
-    sql_decorators: Set[str] = field(
+    sql_decorators: set[str] = field(
         default_factory=lambda: set(DEFAULT_SQL_DECORATORS)
     )
     single_line_threshold: int = 80
@@ -90,8 +89,6 @@ class FormattingConfig:
 
 class SQLFormattingError(Exception):
     """Custom exception for SQL formatting errors."""
-
-    pass
 
 
 def setup_logging(level: str = "INFO") -> logging.Logger:
@@ -106,7 +103,7 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
     return logger
 
 
-def load_config(config_path: Optional[Union[str, Path]] = None) -> FormattingConfig:
+def load_config(config_path: str | Path | None = None) -> FormattingConfig:
     """Loads configuration from a YAML file, or returns defaults if no path given."""
     if config_path is None:
         return FormattingConfig()
@@ -148,7 +145,7 @@ def build_line_offsets(source: str) -> list:
     return offsets
 
 
-def node_offsets(node: ast.AST, line_offsets: list) -> Tuple[int, int]:
+def node_offsets(node: ast.AST, line_offsets: list) -> tuple[int, int]:
     """Converts AST node line/col positions to (start, end) character offsets."""
     start = line_offsets[node.lineno - 1] + node.col_offset
     end = line_offsets[node.end_lineno - 1] + node.end_col_offset
@@ -157,9 +154,9 @@ def node_offsets(node: ast.AST, line_offsets: list) -> Tuple[int, int]:
 
 def format_sql_code(
     sql_code: str,
-    dialect: Optional[str],
+    dialect: str | None,
     config: FormattingConfig,
-    placeholders: Optional[Dict[str, str]] = None,
+    placeholders: dict[str, str] | None = None,
     force_single_line: bool = False,
     is_magic_command: bool = False,
     is_cell_magic: bool = False,
@@ -190,7 +187,7 @@ def format_sql_code(
         # Handle placeholders in f-strings
         placeholder_mapping = {}
         if placeholders:
-            for placeholder in placeholders.keys():
+            for placeholder in placeholders:
                 # Replace placeholder with a valid SQL parameter
                 temp_placeholder = f":{placeholder}"
                 temp_sql = temp_sql.replace(placeholder, temp_placeholder)
@@ -259,7 +256,7 @@ def format_sql_code(
 
     except errors.ParseError as e:
         raise SQLFormattingError(f"Failed to parse SQL code: {e}")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - sqlglot raises many types; normalize them
         raise SQLFormattingError(f"Unexpected error during SQL formatting: {e}")
 
 
@@ -269,7 +266,7 @@ class SQLStringFormatter(ast.NodeVisitor):
     def __init__(
         self,
         config: FormattingConfig,
-        dialect: Optional[str],
+        dialect: str | None,
         logger: logging.Logger,
         line_offsets: list,
     ):
@@ -306,7 +303,7 @@ class SQLStringFormatter(ast.NodeVisitor):
 
         return keyword_count >= 2 or has_sql_pattern
 
-    def extract_fstring_parts(self, node: ast.JoinedStr) -> Tuple[str, Dict[str, str]]:
+    def extract_fstring_parts(self, node: ast.JoinedStr) -> tuple[str, dict[str, str]]:
         """Extracts parts of an f-string, preserving expressions."""
         sql_parts = []
         placeholders = {}
@@ -330,10 +327,10 @@ class SQLStringFormatter(ast.NodeVisitor):
 
     def format_sql_node(
         self,
-        node: Union[ast.Constant, ast.JoinedStr],
+        node: ast.Constant | ast.JoinedStr,
         force_single_line: bool = False,
         in_function: bool = False,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Formats SQL code in AST nodes. Returns replacement text or None."""
         try:
             is_fstring = isinstance(node, ast.JoinedStr)
@@ -378,7 +375,7 @@ class SQLStringFormatter(ast.NodeVisitor):
         except SQLFormattingError as e:
             self.logger.warning(f"SQL formatting skipped: {e}")
             return None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - one bad string must not abort the file
             self.logger.warning(f"Unexpected error during SQL formatting: {e}")
             return None
 
@@ -460,7 +457,7 @@ def _has_skip_hint(source: str) -> bool:
 def format_cell_source(
     code: str,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
 ) -> str:
     """Format SQL in a single cell's source code.
@@ -487,7 +484,7 @@ def format_cell_source(
             continue
         if stripped.startswith("#"):
             continue
-        if stripped.startswith("%%sql") or stripped.startswith("%sql"):
+        if stripped.startswith(("%%sql", "%sql")):
             magic_cmd = stripped.split()[0]
             magic_cmd_index = idx
             break
@@ -554,7 +551,7 @@ def format_cell_source(
 def _format_cells(
     notebook: nbformat.NotebookNode,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
 ) -> bool:
     """Format cells in-place. Returns True if any cell was modified."""
@@ -576,9 +573,9 @@ def _format_cells(
 def _format_python_source(
     source: str,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
-) -> Tuple[str, bool]:
+) -> tuple[str, bool]:
     """Format SQL strings in Python source code.
 
     Returns (formatted_source, changed) tuple.
@@ -615,9 +612,9 @@ def _format_python_source(
 
 
 def process_notebook(
-    notebook_path: Union[str, Path],
+    notebook_path: str | Path,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
     check_only: bool = False,
 ) -> bool:
@@ -639,15 +636,15 @@ def process_notebook(
 
         return changed
 
-    except Exception as e:
-        logger.error(f"Failed to process notebook {notebook_path}: {e}", exc_info=True)
+    except Exception:
+        logger.exception(f"Failed to process notebook {notebook_path}")
         raise
 
 
 def diff_notebook(
-    notebook_path: Union[str, Path],
+    notebook_path: str | Path,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
 ) -> str:
     """Returns a unified diff of formatting changes for a notebook."""
@@ -675,9 +672,9 @@ def diff_notebook(
 
 
 def process_python_file(
-    file_path: Union[str, Path],
+    file_path: str | Path,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
     check_only: bool = False,
 ) -> bool:
@@ -696,15 +693,15 @@ def process_python_file(
 
         return changed
 
-    except Exception as e:
-        logger.error(f"Failed to process file {file_path}: {e}", exc_info=True)
+    except Exception:
+        logger.exception(f"Failed to process file {file_path}")
         raise
 
 
 def diff_python_file(
-    file_path: Union[str, Path],
+    file_path: str | Path,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
 ) -> str:
     """Returns a unified diff of formatting changes for a Python file."""
@@ -823,7 +820,7 @@ def main():
 
         sys.exit(0)
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - CLI boundary: report and exit non-zero
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
 

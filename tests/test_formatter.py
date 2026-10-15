@@ -1,13 +1,14 @@
-import pytest
-import nbformat
-from nbformat import v4 as nbf
 import logging
 
+import nbformat
+import pytest
+from nbformat import v4 as nbf
+
 from sqlnbfmt.formatter import (
-    format_cell_source,
-    process_notebook,
-    load_config,
     diff_notebook,
+    format_cell_source,
+    load_config,
+    process_notebook,
 )
 
 
@@ -423,6 +424,7 @@ def test_main_diff_only_exits_zero(tmp_path):
     result = subprocess.run(
         ["sqlnbfmt", "--diff", str(nb_path)],
         capture_output=True,
+        check=False,
         text=True,
     )
     assert result.returncode == 0
@@ -443,6 +445,7 @@ def test_main_check_exits_one(tmp_path):
     result = subprocess.run(
         ["sqlnbfmt", "--check", str(nb_path)],
         capture_output=True,
+        check=False,
         text=True,
     )
     assert result.returncode == 1
@@ -462,6 +465,7 @@ def test_main_check_diff_exits_one(tmp_path):
     result = subprocess.run(
         ["sqlnbfmt", "--check", "--diff", str(nb_path)],
         capture_output=True,
+        check=False,
         text=True,
     )
     assert result.returncode == 1

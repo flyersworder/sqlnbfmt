@@ -15,7 +15,6 @@ Code > Format Cell menu or configure it for format-on-save.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 
 def _get_formatter_class():
@@ -29,8 +28,8 @@ def _get_formatter_class():
 
         def __init__(
             self,
-            config: Optional[FormattingConfig] = None,
-            dialect: Optional[str] = None,
+            config: FormattingConfig | None = None,
+            dialect: str | None = None,
         ):
             self._config = config or load_config()
             self._dialect = dialect
@@ -49,8 +48,8 @@ def _get_formatter_class():
 
 def register(
     name: str = "sqlnbfmt",
-    dialect: Optional[str] = None,
-    config_path: Optional[str] = None,
+    dialect: str | None = None,
+    config_path: str | None = None,
 ) -> None:
     """Register sqlnbfmt with jupyterlab-code-formatter.
 

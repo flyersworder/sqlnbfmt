@@ -10,6 +10,6 @@ def _load_jupyter_server_extension(server_app):
         server_app.log.info(
             "sqlnbfmt: registered SQL formatter with jupyterlab-code-formatter"
         )
-    except Exception:
-        # jupyterlab-code-formatter not installed — silently skip
-        pass
+    except Exception as e:  # noqa: BLE001 - must never break Jupyter server startup
+        # Usually jupyterlab-code-formatter isn't installed; skip quietly
+        server_app.log.debug(f"sqlnbfmt: skipped formatter registration: {e}")
