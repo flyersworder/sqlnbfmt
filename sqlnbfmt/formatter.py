@@ -6,6 +6,7 @@ import re
 import sys
 import textwrap
 import tomllib
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -482,7 +483,6 @@ class SQLStringFormatter(ast.NodeVisitor):
     ) -> str | None:
         """Formats SQL code in AST nodes. Returns replacement text or None."""
         try:
-            is_fstring = isinstance(node, ast.JoinedStr)
             placeholders = {}
 
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -518,8 +518,17 @@ class SQLStringFormatter(ast.NodeVisitor):
                 for ph, expr in placeholders.items():
                     formatted_sql = formatted_sql.replace(ph, f"{{{expr}}}")
 
+            replacement = self._build_replacement_text(
+                formatted_sql, node, block_indent
+            )
+            if replacement is None:
+                self.logger.debug(
+                    "SQL formatting skipped: the result can't be written back as "
+                    "an equivalent string literal"
+                )
+                return None
             self.changed = True
-            return self._build_replacement_text(formatted_sql, is_fstring, block_indent)
+            return replacement
 
         except SQLFormattingError as e:
             self.logger.warning(f"SQL formatting skipped: {e}")
@@ -529,25 +538,81 @@ class SQLStringFormatter(ast.NodeVisitor):
             return None
 
     def _build_replacement_text(
-        self, formatted_sql: str, is_fstring: bool, block_indent: str | None
-    ) -> str:
-        """Constructs the replacement string literal text.
+        self,
+        formatted_sql: str,
+        node: ast.Constant | ast.JoinedStr,
+        block_indent: str | None,
+    ) -> str | None:
+        """Constructs the replacement string literal, or None if it can't be safe.
 
         With ``block_indent`` (SQL passed to a call), the SQL lines and closing
         quotes are indented by it; where the block starts and what follows it is
         decided by the caller, see ``_layout_call_argument``.
         """
-        prefix = "f" if is_fstring else ""
         if block_indent is not None and "\n" in formatted_sql:
             lines = formatted_sql.split("\n")
             indented_sql = "\n".join(
                 block_indent + line if line.strip() else line for line in lines
             )
-            return f'{prefix}"""\n{indented_sql}\n{block_indent}"""'
-        elif "\n" in formatted_sql:
-            return f'{prefix}"""\n{formatted_sql}\n"""'
+            return self._to_literal(f"\n{indented_sql}\n{block_indent}", node)
+        if "\n" in formatted_sql:
+            return self._to_literal(f"\n{formatted_sql}\n", node)
+        return self._to_literal(formatted_sql, node)
+
+    def _to_literal(self, value: str, node: ast.Constant | ast.JoinedStr) -> str | None:
+        """Writes ``value`` as a Python literal replacing ``node``, or returns None.
+
+        Keeps the original raw (``r``) prefix, escapes backslashes otherwise, and
+        picks quotes that don't clash with the SQL. The result is parsed back and
+        must evaluate to ``value`` (for f-strings: keep the same placeholders);
+        a string that can't be written back faithfully is left alone.
+        """
+        start, _ = node_offsets(node, self.line_offsets)
+        original_prefix = re.match(r"[A-Za-z]*", self.source[start:]).group()
+        raw = "r" in original_prefix.lower()
+        is_fstring = isinstance(node, ast.JoinedStr)
+        prefix = ("r" if raw else "") + ("f" if is_fstring else "")
+        if raw:
+            body = value
+        elif is_fstring and "\\" in value:
+            return None  # escaping could also touch the {expressions}
         else:
-            return f'{prefix}"{formatted_sql}"'
+            body = value.replace("\\", "\\\\")
+
+        quotes = ('"""', "'''") if "\n" in body else ('"', "'", '"""', "'''")
+        for quote in quotes:
+            if (
+                quote in body
+                or body.endswith(quote[0])
+                or (raw and body.endswith("\\"))
+            ):
+                continue
+            literal = f"{prefix}{quote}{body}{quote}"
+            if self._literal_is_faithful(literal, value, node):
+                return literal
+        return None
+
+    @staticmethod
+    def _literal_is_faithful(
+        literal: str, value: str, node: ast.Constant | ast.JoinedStr
+    ) -> bool:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")  # e.g. invalid escape sequences
+                parsed = ast.parse(literal, mode="eval").body
+        except (SyntaxError, SyntaxWarning):
+            return False
+        if isinstance(node, ast.JoinedStr):
+
+            def placeholders(fstring: ast.AST) -> list[str]:
+                return [
+                    ast.dump(part)
+                    for part in getattr(fstring, "values", [])
+                    if isinstance(part, ast.FormattedValue)
+                ]
+
+            return placeholders(parsed) == placeholders(node)
+        return isinstance(parsed, ast.Constant) and parsed.value == value
 
     def visit_Assign(self, node: ast.Assign) -> None:
         """Handles assignments."""
