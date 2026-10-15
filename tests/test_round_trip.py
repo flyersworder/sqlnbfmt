@@ -312,3 +312,84 @@ def test_not_equal_with_parameter_is_still_formatted():
     formatted = fmt(source)
     assert formatted != source
     assert "%s" in formatted
+
+
+# --- Second #34 review: no false skips, data inside strings, robustness ------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'q = "SELECT a FROM t -- why?\\nWHERE b = 1"\n',
+        'cursor.execute("SELECT * FROM t WHERE a = %s -- the id\\n AND b = 2", p)\n',
+        'cursor.execute("SELECT * FROM t WHERE a = %s;", p)\n',
+        'cursor.execute("SELECT * FROM t WHERE id = %s::int AND b = 1", p)\n',
+        "cursor.execute(\"SELECT * FROM t WHERE note LIKE '50%s?' AND a = %s\", p)\n",
+        'q = f"select a as {alias}, b from t where c = 1"\n',
+    ],
+    ids=[
+        "comment-with-qmark",
+        "param-before-comment",
+        "trailing-semicolon",
+        "cast",
+        "param-chars-in-string",
+        "explicit-alias-field",
+    ],
+)
+def test_harmless_rewrites_around_parameters_are_formatted(source, caplog):
+    caplog.set_level(logging.WARNING)
+    formatted = fmt(source)
+    assert formatted != source
+    assert "skipped" not in caplog.text
+    for marker in ("%s", "?", "{alias}"):
+        assert formatted.count(marker) == source.count(marker), marker
+
+
+def test_multiline_string_inside_sql_keeps_its_value():
+    source = (
+        "def _():\n"
+        '    cursor.execute("""SELECT a, \'multi\nline\' AS s FROM t WHERE c = 1""")\n'
+    )
+    formatted = fmt(source)
+    assert formatted != source
+    assert "'multi\nline'" in formatted
+    assert_same_meaning(source, formatted)
+
+
+@pytest.mark.parametrize("newline", ["\r", "\r\n"])
+def test_carriage_return_line_breaks(newline):
+    source = (
+        f'x = "é"{newline}cursor.execute("SELECT a, b FROM t WHERE c = 1"){newline}'
+    )
+    formatted = format_cell_source(source, FormattingConfig(), None, LOGGER)
+    parse_strict(formatted)
+    assert "SELECT" in formatted and "FROM t" in formatted
+
+
+def test_oracle_numeric_parameters_are_kept():
+    source = 'cursor.execute("select a, b from t where x = :1 and y = :2", p)\n'
+    formatted = fmt(source, "oracle")
+    assert formatted != source
+    assert formatted.count(":1") == 1 and formatted.count(":2") == 1
+
+
+def test_one_bad_rewrite_does_not_discard_the_others(monkeypatch, caplog):
+    """The safety net rejects only the faulty rewrite and names its line."""
+    caplog.set_level(logging.WARNING)
+    original = SQLStringFormatter._layout_call_argument
+
+    def bad_layout(self, start, end, block, base_indent, block_indent):
+        if "bad" in self.source[start:end]:
+            return start, end + 1, block  # swallows the closing paren
+        return original(self, start, end, block, base_indent, block_indent)
+
+    monkeypatch.setattr(SQLStringFormatter, "_layout_call_argument", bad_layout)
+    source = (
+        'pd.read_sql("select a, b from good where c = 1 and d = 2")\n'
+        'pd.read_sql("select a, b from bad where c = 1 and d = 2")\n'
+    )
+    result, changed = _format_python_source(source, FormattingConfig(), None, LOGGER)
+    assert changed
+    assert "FROM good" in result
+    assert 'pd.read_sql("select a, b from bad where c = 1 and d = 2")' in result
+    assert "line 2" in caplog.text

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import nbformat
 import yaml
-from sqlglot import errors, parse
+from sqlglot import errors, exp, parse
 from sqlglot.dialects.dialect import Dialect
 
 DEFAULT_SQL_KEYWORDS = frozenset(
@@ -290,12 +290,14 @@ def load_config(config_path: str | Path | None = None) -> FormattingConfig:
     return _config_from_dict(config or {})
 
 
+# Line breaks as Python's tokenizer sees them (a lone "\r" counts too)
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+
 def build_line_offsets(source: str) -> list:
     """Returns list where offsets[i] is the character offset of line i+1 in source."""
     offsets = [0]
-    for i, ch in enumerate(source):
-        if ch == "\n":
-            offsets.append(i + 1)
+    offsets.extend(match.end() for match in _LINE_BREAK.finditer(source))
     return offsets
 
 
@@ -319,41 +321,76 @@ def node_offsets(node: ast.AST, line_offsets: list, source: str) -> tuple[int, i
     )
 
 
-# DB-API / driver parameter styles: pyformat, format, qmark, named, numeric
-_PARAMETER = re.compile(r"%\(\w+\)s|%s|\?|(?<![:\w]):[A-Za-z_]\w*|\$\d+")
-_SQL_TOKEN = re.compile(r"[<>!=]+|\w+|[^\w\s]")
-_EQUIVALENT_TOKENS = {"!=": "<>", "==": "="}
+# Quoted strings and comments are skipped (their text is kept verbatim by
+# sqlglot); "param" matches a query parameter outside them. Styles: %(name)s
+# (pyformat), %s (format), ? (qmark), :name and :1 (named, numeric), $1.
+_SQL_LEXEME = re.compile(
+    r"""'(?:''|\\.|[^'\\])*'"""
+    r'''|"(?:""|\\.|[^"\\])*"'''
+    r"|`[^`]*`|--[^\r\n]*|/\*.*?\*/"
+    r"|(?P<param>%\(\w+\)s|%s|\?|(?<![:\w]):\w+|\$\d+)",
+    re.DOTALL,
+)
+_POSITIONAL_PARAMETERS = {"%s", "?"}
 
 
 def _unique_prefix(text: str, base: str) -> str:
     """``base``, extended until it doesn't occur in ``text`` (case-insensitively)."""
+    lowered = text.lower()
     prefix = base
-    while prefix.lower() in text.lower():
+    while prefix.lower() in lowered:
         prefix += "X"
     return prefix
 
 
-def _stand_in_contexts(sql: str, stand_ins: list[str]) -> list[tuple[str, str, str]]:
-    """(stand-in, previous token, next token) for each stand-in, in order."""
+def _newlines_in_strings(sql: str) -> set[int]:
+    """Positions of line breaks that are part of a quoted SQL string's value."""
+    positions = set()
+    for match in _SQL_LEXEME.finditer(sql):
+        if match.group(0)[:1] in ("'", '"'):
+            positions.update(
+                match.start() + i for i, ch in enumerate(match.group(0)) if ch == "\n"
+            )
+    return positions
+
+
+def _check_placeholders(
+    statements: list,
+    original_sql: str,
+    formatted_sql: str,
+    stand_ins: list[str],
+    positional: set[str],
+) -> None:
+    """Raises PlaceholderMovedError if formatting moved or reinterpreted one.
+
+    - Every stand-in comes back exactly as often as it went in.
+    - Positional parameters (%s, ?) bind by order, so they keep their order
+      (sqlglot reorders e.g. OFFSET/LIMIT, or LIMIT ? into T-SQL TOP (?)).
+    - A stand-in isn't turned into an alias unless the original wrote AS before
+      it: in f"FROM t {where_clause}" sqlglot reads the field as a table alias
+      and prints FROM t AS {where_clause}.
+    """
     if not stand_ins:
-        return []
-    pattern = re.compile(
-        "|".join(map(re.escape, sorted(stand_ins, key=len, reverse=True)))
-    )
-    tokens = [
-        _EQUIVALENT_TOKENS.get(token, token).upper()
-        for token in _SQL_TOKEN.findall(pattern.sub(lambda m: f" {m.group(0)} ", sql))
-    ]
+        return
+    for token in stand_ins:
+        if formatted_sql.count(token) != original_sql.count(token):
+            raise PlaceholderMovedError(f"formatting would alter placeholder {token}")
+    if positional:
+        pattern = re.compile("|".join(map(re.escape, sorted(positional))))
+        if pattern.findall(formatted_sql) != pattern.findall(original_sql):
+            raise PlaceholderMovedError(
+                "formatting would reorder positional query parameters"
+            )
     upper_stand_ins = {token.upper() for token in stand_ins}
-    return [
-        (
-            token,
-            tokens[i - 1] if i > 0 else "",
-            tokens[i + 1] if i + 1 < len(tokens) else "",
-        )
-        for i, token in enumerate(tokens)
-        if token in upper_stand_ins
-    ]
+    for statement in statements:
+        for alias in statement.find_all(exp.Alias, exp.TableAlias):
+            name = alias.alias if isinstance(alias, exp.Alias) else alias.name
+            if name.upper() in upper_stand_ins and not re.search(
+                rf"\bAS\s+{re.escape(name)}\b", original_sql, re.IGNORECASE
+            ):
+                raise PlaceholderMovedError(
+                    "formatting would turn an f-string field or parameter into an alias"
+                )
 
 
 def format_sql_code(
@@ -399,12 +436,15 @@ def format_sql_code(
         parameters: dict[str, str] = {}
 
         def stand_in(match: re.Match) -> str:
+            if match.group("param") is None:
+                return match.group(0)  # a quoted string or comment: keep as is
             token = f"{prefix}{len(parameters)}_"
             parameters[token] = match.group(0)
             return token
 
-        temp_sql = _PARAMETER.sub(stand_in, temp_sql)
+        temp_sql = _SQL_LEXEME.sub(stand_in, temp_sql)
         stand_ins = [*(placeholders or ()), *parameters]
+        positional = {t for t, p in parameters.items() if p in _POSITIONAL_PARAMETERS}
 
         temp_sql = temp_sql.strip()
 
@@ -431,15 +471,7 @@ def format_sql_code(
         else:
             formatted_sql = formatted_sql.strip()
 
-        # Parameters bind by position and fields can hold whole clauses, so each
-        # stand-in must keep its order and its neighbouring tokens; otherwise
-        # sqlglot moved it (LIMIT/OFFSET, TOP) or rewrapped it (FROM t AS {x}).
-        if _stand_in_contexts(formatted_sql, stand_ins) != _stand_in_contexts(
-            temp_sql, stand_ins
-        ):
-            raise PlaceholderMovedError(
-                "formatting would move or rewrap a query parameter or f-string field"
-            )
+        _check_placeholders(statements, temp_sql, formatted_sql, stand_ins, positional)
 
         # Restore query parameters; f-string fields are restored by the caller
         for token, original in parameters.items():
@@ -504,46 +536,68 @@ def _string_literals(tree: ast.AST) -> list[ast.AST]:
     return sorted(found, key=lambda n: (n.lineno, n.col_offset))
 
 
+def _splice(source: str, replacements: list[SQLReplacement]) -> str:
+    result = source
+    for rep in sorted(replacements, key=lambda r: r.start_offset, reverse=True):
+        result = result[: rep.start_offset] + rep.new_text + result[rep.end_offset :]
+    return result
+
+
+def _is_faithful(
+    tree: ast.AST, result: str, replacements: list[SQLReplacement]
+) -> bool:
+    """The edited source parses, with the same string literals in the same order,
+    untouched ones unchanged and rewritten ones equal to their intended template."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            new_tree = ast.parse(result)
+    except SyntaxError:
+        return False
+    intended = {id(rep.node): rep.intended for rep in replacements}
+    old_literals = _string_literals(tree)
+    new_literals = _string_literals(new_tree)
+    return len(old_literals) == len(new_literals) and all(
+        literal_template(new) == intended.get(id(old), literal_template(old))
+        for old, new in zip(old_literals, new_literals)
+    )
+
+
 def _apply_replacements(
     source: str,
     tree: ast.AST,
     replacements: list[SQLReplacement],
     logger: logging.Logger,
 ) -> str:
-    """Applies replacements, or returns ``source`` if the result isn't faithful.
+    """Applies the replacements that keep the code's meaning (safety net).
 
-    Safety net: the edited source must parse, have the same string literals in
-    the same order, every untouched literal unchanged and every rewritten one
-    equal to its intended template.
+    If the combined result fails the check, each rewrite is checked on its own;
+    failing ones are reported by line and dropped, the others still applied.
     """
-    result = source
-    for rep in sorted(replacements, key=lambda r: r.start_offset, reverse=True):
-        result = result[: rep.start_offset] + rep.new_text + result[rep.end_offset :]
+    result = _splice(source, replacements)
+    if _is_faithful(tree, result, replacements):
+        return result
 
-    intended = {id(rep.node): rep.intended for rep in replacements}
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            new_tree = ast.parse(result)
-    except SyntaxError:
-        new_tree = None
-    old_literals = _string_literals(tree)
-    new_literals = _string_literals(new_tree) if new_tree else []
-    if (
-        new_tree is None
-        or len(old_literals) != len(new_literals)
-        or any(
-            literal_template(new) != intended.get(id(old), literal_template(old))
-            for old, new in zip(old_literals, new_literals)
-        )
-    ):
+    good = []
+    for rep in replacements:
+        if _is_faithful(tree, _splice(source, [rep]), [rep]):
+            good.append(rep)
+        else:
+            logger.warning(
+                f"line {rep.node.lineno}: SQL formatting skipped: the rewrite failed "
+                "the safety check, so this string was left unchanged. Please report "
+                "this at https://github.com/flyersworder/sqlnbfmt/issues"
+            )
+    if good and len(good) < len(replacements):
+        result = _splice(source, good)
+        if _is_faithful(tree, result, good):
+            return result
+    if good:
         logger.warning(
-            "SQL formatting would have changed the code's meaning, so it was left "
-            "unchanged. Please report this at "
-            "https://github.com/flyersworder/sqlnbfmt/issues"
+            "SQL formatting failed the safety check, so the code was left unchanged. "
+            "Please report this at https://github.com/flyersworder/sqlnbfmt/issues"
         )
-        return source
-    return result
+    return source
 
 
 class SQLStringFormatter(ast.NodeVisitor):
@@ -564,7 +618,6 @@ class SQLStringFormatter(ast.NodeVisitor):
         self.line_offsets = line_offsets
         self.source = source
         self.replacements: list = []
-        self.changed = False
 
     def is_likely_sql(self, code: str) -> bool:
         """Enhanced SQL detection with better heuristics."""
@@ -660,7 +713,6 @@ class SQLStringFormatter(ast.NodeVisitor):
                     "can't be written back as an equivalent string literal"
                 )
                 return None
-            self.changed = True
             return replacement
 
         except SQLFormattingError as e:
@@ -684,10 +736,15 @@ class SQLStringFormatter(ast.NodeVisitor):
         decided by the caller, see ``_layout_call_argument``.
         """
         if block_indent is not None and "\n" in formatted_sql:
-            lines = formatted_sql.split("\n")
-            indented_sql = "\n".join(
-                block_indent + line if line.strip() else line for line in lines
-            )
+            # Lines continuing a multi-line SQL string are part of its value
+            in_string = _newlines_in_strings(formatted_sql)
+            lines, position = [], 0
+            for i, line in enumerate(formatted_sql.split("\n")):
+                continues_string = i > 0 and position - 1 in in_string
+                indent = "" if continues_string or not line.strip() else block_indent
+                lines.append(indent + line)
+                position += len(line) + 1
+            indented_sql = "\n".join(lines)
             return self._to_literal(
                 f"\n{indented_sql}\n{block_indent}", node, placeholders
             )
@@ -786,7 +843,7 @@ class SQLStringFormatter(ast.NodeVisitor):
     ) -> None:
         """Formats a SQL argument, indented relative to the line the call starts on."""
         call_line_start = self.line_offsets[call.lineno - 1]
-        call_line = self.source[call_line_start:].partition("\n")[0]
+        call_line = _LINE_BREAK.split(self.source[call_line_start:], maxsplit=1)[0]
         base_indent = call_line[: len(call_line) - len(call_line.lstrip())]
         block_indent = base_indent + " " * self.config.indent_width
 
@@ -821,7 +878,10 @@ class SQLStringFormatter(ast.NodeVisitor):
         the call's indentation; other arguments stay after the closing quotes, so
         code outside the string is never rewritten beyond whitespace.
         """
-        line_start = self.source.rfind("\n", 0, start) + 1
+        line_start = (
+            max(self.source.rfind("\n", 0, start), self.source.rfind("\r", 0, start))
+            + 1
+        )
         before = self.source[line_start:start]
         if not before.strip():
             start, block = line_start, block_indent + block
@@ -942,7 +1002,11 @@ def format_cell_source(
 
     line_offsets = build_line_offsets(code)
     formatter = SQLStringFormatter(config, dialect, logger, line_offsets, code)
-    formatter.visit(tree)
+    try:
+        formatter.visit(tree)
+    except Exception as e:  # noqa: BLE001 - never abort a whole run over one cell or file
+        logger.warning(f"SQL formatting skipped: unexpected error: {e}")
+        return code
 
     if not formatter.replacements:
         return code
@@ -996,7 +1060,11 @@ def _format_python_source(
 
     line_offsets = build_line_offsets(source)
     formatter = SQLStringFormatter(config, dialect, logger, line_offsets, source)
-    formatter.visit(tree)
+    try:
+        formatter.visit(tree)
+    except Exception as e:  # noqa: BLE001 - never abort a whole run over one cell or file
+        logger.warning(f"SQL formatting skipped: unexpected error: {e}")
+        return source, False
 
     if not formatter.replacements:
         return source, False
