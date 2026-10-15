@@ -15,18 +15,18 @@ def _(mo):
     # Fetch active users for the dashboard
     # This query powers the main reporting view
     _df = mo.sql(
-    f"""
-    SELECT
-      id,
-      name,
-      email
-    FROM users
-    WHERE
-      active = 1
-    ORDER BY
-      name
-    """
-)
+        f"""
+        SELECT
+          id,
+          name,
+          email
+        FROM users
+        WHERE
+          active = 1
+        ORDER BY
+          name
+        """
+    )
     return
 
 
@@ -35,14 +35,14 @@ def _(mo):
     threshold = 100
     # Orders above threshold
     result = mo.sql(
-    f"""
-    SELECT
-      *
-    FROM orders
-    WHERE
-      total > {threshold}
-    """
-)  # important query
+        f"""
+        SELECT
+          *
+        FROM orders
+        WHERE
+          total > {threshold}
+        """
+    )  # important query
     return (result,)
 
 

@@ -76,7 +76,7 @@ pip install sqlnbfmt jupyterlab-code-formatter
 
 That's it — sqlnbfmt auto-registers as a Jupyter server extension. In JupyterLab, use **Edit > Format Cell** or configure format-on-save in Settings > Code Formatter, and select "Apply SQL Notebook Formatter".
 
-To customize the dialect, add this to `~/.jupyter/jupyter_server_config.py`:
+The extension uses `[tool.sqlnbfmt]` (including `dialect`) from the nearest `pyproject.toml` of the directory you start Jupyter in. To set the dialect explicitly instead, add this to `~/.jupyter/jupyter_server_config.py`:
 ```python
 from sqlnbfmt.jupyterlab_integration import register
 register(dialect="postgres")
@@ -93,7 +93,7 @@ pip install pre-commit
 ```yaml
 repos:
   - repo: https://github.com/flyersworder/sqlnbfmt
-    rev: v0.4.0
+    rev: v0.5.0
     hooks:
       - id: sqlnbfmt
         types: [jupyter]
@@ -105,7 +105,7 @@ To also format Marimo notebooks (Python files), add the Python hook:
         files: '\.py$'  # optionally narrow with: files: 'marimo_.*\.py$'
 ```
 
-All arguments are optional. To specify a dialect or custom config:
+All arguments are optional. Settings in `[tool.sqlnbfmt]` in your `pyproject.toml` are picked up automatically (see [Configuration](#configuration)); alternatively pass them as arguments:
 ```yaml
         args: [--dialect, postgres, --config, config.yaml]
 ```
@@ -134,19 +134,38 @@ Use `--check` in GitHub Actions to enforce formatting:
 
 ## Configuration
 
-`sqlnbfmt` works without any configuration file. A `config.yaml` is only needed to override defaults.
+`sqlnbfmt` works without any configuration. To override defaults, use a `[tool.sqlnbfmt]` table in `pyproject.toml` or a separate YAML file.
 
-Create a `config.yaml` file to customize formatting behavior. [Here](https://github.com/flyersworder/sqlnbfmt/blob/main/config.yaml) is a template.
+### pyproject.toml
+
+```toml
+[tool.sqlnbfmt]
+dialect = "postgres"
+
+[tool.sqlnbfmt.formatting_options]
+indent_width = 2
+```
+
+`sqlnbfmt` searches the current directory and its parents for the nearest `pyproject.toml` with a `[tool.sqlnbfmt]` table, stopping at the repository root (the directory containing `.git`). A `pyproject.toml` without that table is skipped, so a sub-package's file doesn't hide the repository-level configuration. The JupyterLab integration does the same, starting from the Jupyter server's working directory.
+
+### YAML file
+
+Pass a YAML file with `--config config.yaml`. [Here](https://github.com/flyersworder/sqlnbfmt/blob/main/config.yaml) is a template. `--config` also accepts a `.toml` path, which is read from its `[tool.sqlnbfmt]` table.
+
+When `--config` is given, `pyproject.toml` discovery is skipped. Options you don't set keep their defaults, and unknown option names produce a warning.
 
 ### Configuration Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
+| `dialect` | SQL dialect passed to sqlglot (e.g. `postgres`, `mysql`, `bigquery`); `--dialect` overrides it | none (generic SQL) |
 | `sql_keywords` | SQL keywords to recognize and format | Common SQL keywords |
-| `function_names` | Python functions containing SQL code | `read_sql`, `execute`, etc. |
+| `function_names` | Python functions containing SQL code | `read_sql`, `execute`, `sql` (Marimo's `mo.sql`), etc. |
 | `sql_decorators` | Decorators indicating SQL code | `query`, `sql_query`, etc. |
-| `single_line_threshold` | Maximum length before splitting SQL | 80 |
-| `indent_width` | Number of spaces for indentation | 4 |
+| `formatting_options.single_line_threshold` | Maximum length before splitting SQL | 80 |
+| `formatting_options.indent_width` | Number of spaces for indentation | 4 |
+
+`sql_keywords`, `function_names` and `sql_decorators` **replace** the built-in lists rather than extending them. Copy the defaults you still rely on from the [template](https://github.com/flyersworder/sqlnbfmt/blob/main/config.yaml); for example, keep `sql` in `function_names` or Marimo's `mo.sql()` calls stop being formatted.
 
 ## Examples
 
@@ -159,20 +178,20 @@ execute_sql("""SELECT a.col1, b.col2 FROM table_a a JOIN table_b b ON a.id = b.a
 
 After formatting:
 ```python
-execute_sql("""
-SELECT
-  a.col1,
-  b.col2
-FROM
-  table_a AS a
-JOIN
-  table_b AS b
-  ON a.id = b.a_id
-WHERE
-  a.status = 'active'
-ORDER BY
-  a.created_at DESC
-""")
+execute_sql(
+    """
+    SELECT
+      a.col1,
+      b.col2
+    FROM table_a AS a
+    JOIN table_b AS b
+      ON a.id = b.a_id
+    WHERE
+      a.status = 'active'
+    ORDER BY
+      a.created_at DESC
+    """
+)
 ```
 
 ### Marimo Notebook
@@ -190,17 +209,17 @@ After formatting:
 @app.cell
 def _(mo):
     _df = mo.sql(
-    f"""
-    SELECT
-      id,
-      name
-    FROM users
-    WHERE
-      active = 1
-    ORDER BY
-      name
-    """
-)
+        f"""
+        SELECT
+          id,
+          name
+        FROM users
+        WHERE
+          active = 1
+        ORDER BY
+          name
+        """
+    )
     return
 ```
 
@@ -208,7 +227,7 @@ def _(mo):
 
 **SQL not being formatted?**
 - Ensure the string contains at least 2 SQL keywords or a recognizable pattern like `SELECT...FROM`
-- Check that the function name is in the recognized list (use `--config` to add custom ones)
+- Check that the function name is in the recognized list (add custom ones via `function_names` in `[tool.sqlnbfmt]` or `--config`)
 
 **Comments being modified?**
 - Python comments (`#`) are preserved. SQL comments (`--`) inside strings are converted to `/* */` block comments by sqlglot.

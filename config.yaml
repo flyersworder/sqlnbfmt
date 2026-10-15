@@ -2,6 +2,9 @@
 # Use this file only to override specific settings.
 # config.yaml
 
+# SQL dialect for sqlglot (e.g. postgres, mysql, bigquery); --dialect overrides it
+# dialect: postgres
+
 sql_keywords:
   - SELECT
   - FROM
@@ -35,6 +38,7 @@ function_names:
   - fetchone
   - fetchmany
   - execute_query
+  - sql  # Marimo mo.sql()
 
 # Decorator names that contain SQL
 sql_decorators:

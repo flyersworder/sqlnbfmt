@@ -5,16 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.2] - Unreleased
+## [0.5.0] - 2026-10-15
 
 ### Added
 
+- **`pyproject.toml` configuration**: set options in a `[tool.sqlnbfmt]` table instead of a separate YAML file. Without `--config`, sqlnbfmt uses the nearest `pyproject.toml` that has the table, searching up to the repository root. The JupyterLab integration uses the same discovery ([#22](https://github.com/flyersworder/sqlnbfmt/issues/22))
+- `--config` accepts a `.toml` path as well as YAML
+- `dialect` config option (in `[tool.sqlnbfmt]` or YAML), so the dialect no longer has to be passed as `--dialect` on every run; `--dialect` still overrides it
 - **Jupyter server extension**: `pip install sqlnbfmt` now auto-registers with jupyterlab-code-formatter — no manual config needed
 
 ### Changed
 
+- Config values are now type-checked: a wrong type (e.g. a string where a list is expected) is reported as an error naming the file. Previously such values were silently mis-parsed or crashed with a traceback
+- Unknown config options now produce a warning instead of being silently ignored
+
+### Fixed
+
+- SQL passed to a function call is now indented relative to the line the call is on, and a closing `)` or remaining arguments no longer land at column 0. This was most visible in Marimo cells, where every `mo.sql(...)` sits inside a function. It had regressed in 0.3.0, when the `black` post-processing pass was removed. Code already formatted by an earlier version keeps its layout until its SQL changes
+- The Jupyter server extension no longer overrides a formatter registered in `jupyter_server_config.py` (e.g. `register(dialect="postgres")`), and it now logs configuration errors instead of silently not registering
+- An unknown dialect (e.g. `--dialect postgress`) is now rejected with a suggestion. Previously every SQL string silently failed to parse, so `--check` reported all files as properly formatted
+- The `config.yaml` template was missing the `sql` function name (default since 0.4.0). Because config lists replace the defaults, copying the template silently disabled Marimo `mo.sql()` formatting. The README now states the replace semantics explicitly
+- Upgraded locked dependencies, including sqlglot 29 → 30 (formatting output unchanged across the eval suite)
 - Switched build system from setuptools to hatchling
 - Updated JupyterLab docs to use `jupyter_server_config.py` (modern) instead of `jupyter_notebook_config.py` (legacy)
+- A skipped Jupyter extension registration is now logged at debug level instead of being silently swallowed
 
 ## [0.4.0] - 2026-03-24
 

@@ -5,13 +5,14 @@ import logging
 import re
 import sys
 import textwrap
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Set, Optional, Dict, Union, Tuple
 
 import nbformat
 import yaml
-from sqlglot import parse, errors
+from sqlglot import errors, parse
+from sqlglot.dialects.dialect import Dialect
 
 DEFAULT_SQL_KEYWORDS = frozenset(
     {
@@ -77,21 +78,24 @@ class SQLReplacement:
 class FormattingConfig:
     """Configuration for SQL formatting."""
 
-    sql_keywords: Set[str] = field(default_factory=lambda: set(DEFAULT_SQL_KEYWORDS))
-    function_names: Set[str] = field(
+    sql_keywords: set[str] = field(default_factory=lambda: set(DEFAULT_SQL_KEYWORDS))
+    function_names: set[str] = field(
         default_factory=lambda: set(DEFAULT_FUNCTION_NAMES)
     )
-    sql_decorators: Set[str] = field(
+    sql_decorators: set[str] = field(
         default_factory=lambda: set(DEFAULT_SQL_DECORATORS)
     )
     single_line_threshold: int = 80
     indent_width: int = 4
+    dialect: str | None = None
 
 
 class SQLFormattingError(Exception):
     """Custom exception for SQL formatting errors."""
 
-    pass
+
+class ConfigError(ValueError):
+    """Raised when a configuration file is malformed or has invalid values."""
 
 
 def setup_logging(level: str = "INFO") -> logging.Logger:
@@ -106,8 +110,124 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
     return logger
 
 
-def load_config(config_path: Optional[Union[str, Path]] = None) -> FormattingConfig:
-    """Loads configuration from a YAML file, or returns defaults if no path given."""
+def _string_set(config: dict, key: str, default: frozenset[str]) -> set[str]:
+    value = config.get(key, default)
+    if not isinstance(value, list | tuple | set | frozenset) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ConfigError(f"'{key}' must be a list of strings, got {value!r}")
+    return set(value)
+
+
+def _integer(options: dict, key: str, default: int) -> int:
+    value = options.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"'{key}' must be an integer, got {value!r}")
+    return value
+
+
+def validate_dialect(dialect: str) -> str:
+    """Returns ``dialect`` unchanged if sqlglot knows it, else raises ValueError.
+
+    Without this check an unknown dialect makes every SQL string fail to parse,
+    and since per-string failures are only warnings, ``--check`` would pass.
+    """
+    Dialect.get_or_raise(dialect)
+    return dialect
+
+
+def _optional_dialect(config: dict) -> str | None:
+    value = config.get("dialect")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(f"'dialect' must be a string, got {value!r}")
+    try:
+        return validate_dialect(value)
+    except ValueError as e:
+        raise ConfigError(str(e)) from e
+
+
+_TOP_LEVEL_KEYS = {
+    "dialect",
+    "sql_keywords",
+    "function_names",
+    "sql_decorators",
+    "formatting_options",
+}
+_FORMATTING_KEYS = {"single_line_threshold", "indent_width"}
+
+
+def _warn_unknown_keys(config: dict, options: dict) -> None:
+    """Warns about unrecognized options, which would otherwise be silently ignored."""
+    logger = logging.getLogger("formatter")
+    for key in config.keys() - _TOP_LEVEL_KEYS:
+        hint = (
+            f" (did you mean 'formatting_options.{key}'?)"
+            if key in _FORMATTING_KEYS
+            else ""
+        )
+        logger.warning(f"Ignoring unknown configuration option '{key}'{hint}")
+    for key in options.keys() - _FORMATTING_KEYS:
+        logger.warning(
+            f"Ignoring unknown configuration option 'formatting_options.{key}'"
+        )
+
+
+def _config_from_dict(config: dict) -> FormattingConfig:
+    """Builds a FormattingConfig from a parsed YAML document or [tool.sqlnbfmt] table."""
+    if not isinstance(config, dict):
+        raise ConfigError(f"configuration must be a mapping, got {config!r}")
+    options = config.get("formatting_options", {})
+    if not isinstance(options, dict):
+        raise ConfigError(f"'formatting_options' must be a mapping, got {options!r}")
+    _warn_unknown_keys(config, options)
+    return FormattingConfig(
+        sql_keywords=_string_set(config, "sql_keywords", DEFAULT_SQL_KEYWORDS),
+        function_names=_string_set(config, "function_names", DEFAULT_FUNCTION_NAMES),
+        sql_decorators=_string_set(config, "sql_decorators", DEFAULT_SQL_DECORATORS),
+        single_line_threshold=_integer(options, "single_line_threshold", 80),
+        indent_width=_integer(options, "indent_width", 4),
+        dialect=_optional_dialect(config),
+    )
+
+
+def _read_pyproject_table(pyproject: Path) -> dict | None:
+    """Returns the [tool.sqlnbfmt] table of a pyproject.toml, or None if absent."""
+    try:
+        with open(pyproject, "rb") as file:
+            data = tomllib.load(file)
+    except OSError as e:
+        raise ConfigError(f"Could not read {pyproject}: {e}") from e
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"Could not parse {pyproject}: {e}") from e
+    return data.get("tool", {}).get("sqlnbfmt")
+
+
+def find_pyproject_config(start: str | Path | None = None) -> Path | None:
+    """Finds the nearest pyproject.toml with a [tool.sqlnbfmt] table.
+
+    Searches ``start`` (default: the current directory) and its parents, stopping
+    after the repository root (a directory containing ``.git``) or the filesystem
+    root. Files without a [tool.sqlnbfmt] table are skipped, so a sub-package's
+    pyproject.toml doesn't hide the repository-level configuration.
+    """
+    directory = Path(start or Path.cwd()).resolve()
+    for candidate in (directory, *directory.parents):
+        pyproject = candidate / "pyproject.toml"
+        if pyproject.is_file() and _read_pyproject_table(pyproject) is not None:
+            return pyproject
+        if (candidate / ".git").exists():
+            break
+    return None
+
+
+def load_config(config_path: str | Path | None = None) -> FormattingConfig:
+    """Loads configuration from a YAML file or a pyproject.toml.
+
+    A ``.toml`` path is read from its [tool.sqlnbfmt] table; any other path is
+    parsed as YAML. Returns defaults if no path is given.
+    """
     if config_path is None:
         return FormattingConfig()
 
@@ -115,28 +235,20 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> FormattingCon
     if not config_file.is_file():
         raise FileNotFoundError(f"Configuration file '{config_file}' not found.")
 
+    if config_file.suffix == ".toml":
+        table = _read_pyproject_table(config_file)
+        if table is None:
+            raise ConfigError(f"{config_file} has no [tool.sqlnbfmt] table")
+        return _config_from_dict(table)
+
     try:
         with open(config_file) as file:
             config = yaml.safe_load(file)
-            if config is None:
-                return FormattingConfig()
-            return FormattingConfig(
-                sql_keywords=set(config.get("sql_keywords", DEFAULT_SQL_KEYWORDS)),
-                function_names=set(
-                    config.get("function_names", DEFAULT_FUNCTION_NAMES)
-                ),
-                sql_decorators=set(
-                    config.get("sql_decorators", DEFAULT_SQL_DECORATORS)
-                ),
-                single_line_threshold=config.get("formatting_options", {}).get(
-                    "single_line_threshold", 80
-                ),
-                indent_width=config.get("formatting_options", {}).get(
-                    "indent_width", 4
-                ),
-            )
+    except OSError as e:
+        raise ConfigError(f"Could not read {config_file}: {e}") from e
     except yaml.YAMLError as e:
         raise yaml.YAMLError(f"Error parsing the configuration file: {e}")
+    return _config_from_dict(config or {})
 
 
 def build_line_offsets(source: str) -> list:
@@ -148,7 +260,7 @@ def build_line_offsets(source: str) -> list:
     return offsets
 
 
-def node_offsets(node: ast.AST, line_offsets: list) -> Tuple[int, int]:
+def node_offsets(node: ast.AST, line_offsets: list) -> tuple[int, int]:
     """Converts AST node line/col positions to (start, end) character offsets."""
     start = line_offsets[node.lineno - 1] + node.col_offset
     end = line_offsets[node.end_lineno - 1] + node.end_col_offset
@@ -157,9 +269,9 @@ def node_offsets(node: ast.AST, line_offsets: list) -> Tuple[int, int]:
 
 def format_sql_code(
     sql_code: str,
-    dialect: Optional[str],
+    dialect: str | None,
     config: FormattingConfig,
-    placeholders: Optional[Dict[str, str]] = None,
+    placeholders: dict[str, str] | None = None,
     force_single_line: bool = False,
     is_magic_command: bool = False,
     is_cell_magic: bool = False,
@@ -190,7 +302,7 @@ def format_sql_code(
         # Handle placeholders in f-strings
         placeholder_mapping = {}
         if placeholders:
-            for placeholder in placeholders.keys():
+            for placeholder in placeholders:
                 # Replace placeholder with a valid SQL parameter
                 temp_placeholder = f":{placeholder}"
                 temp_sql = temp_sql.replace(placeholder, temp_placeholder)
@@ -259,7 +371,7 @@ def format_sql_code(
 
     except errors.ParseError as e:
         raise SQLFormattingError(f"Failed to parse SQL code: {e}")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - sqlglot raises many types; normalize them
         raise SQLFormattingError(f"Unexpected error during SQL formatting: {e}")
 
 
@@ -269,15 +381,17 @@ class SQLStringFormatter(ast.NodeVisitor):
     def __init__(
         self,
         config: FormattingConfig,
-        dialect: Optional[str],
+        dialect: str | None,
         logger: logging.Logger,
         line_offsets: list,
+        source: str,
     ):
         super().__init__()
         self.config = config
         self.dialect = dialect
         self.logger = logger
         self.line_offsets = line_offsets
+        self.source = source
         self.replacements: list = []
         self.changed = False
 
@@ -306,7 +420,7 @@ class SQLStringFormatter(ast.NodeVisitor):
 
         return keyword_count >= 2 or has_sql_pattern
 
-    def extract_fstring_parts(self, node: ast.JoinedStr) -> Tuple[str, Dict[str, str]]:
+    def extract_fstring_parts(self, node: ast.JoinedStr) -> tuple[str, dict[str, str]]:
         """Extracts parts of an f-string, preserving expressions."""
         sql_parts = []
         placeholders = {}
@@ -330,10 +444,10 @@ class SQLStringFormatter(ast.NodeVisitor):
 
     def format_sql_node(
         self,
-        node: Union[ast.Constant, ast.JoinedStr],
+        node: ast.Constant | ast.JoinedStr,
         force_single_line: bool = False,
-        in_function: bool = False,
-    ) -> Optional[str]:
+        block_indent: str | None = None,
+    ) -> str | None:
         """Formats SQL code in AST nodes. Returns replacement text or None."""
         try:
             is_fstring = isinstance(node, ast.JoinedStr)
@@ -373,26 +487,31 @@ class SQLStringFormatter(ast.NodeVisitor):
                     formatted_sql = formatted_sql.replace(ph, f"{{{expr}}}")
 
             self.changed = True
-            return self._build_replacement_text(formatted_sql, is_fstring, in_function)
+            return self._build_replacement_text(formatted_sql, is_fstring, block_indent)
 
         except SQLFormattingError as e:
             self.logger.warning(f"SQL formatting skipped: {e}")
             return None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - one bad string must not abort the file
             self.logger.warning(f"Unexpected error during SQL formatting: {e}")
             return None
 
     def _build_replacement_text(
-        self, formatted_sql: str, is_fstring: bool, in_function: bool
+        self, formatted_sql: str, is_fstring: bool, block_indent: str | None
     ) -> str:
-        """Constructs the replacement string literal text."""
+        """Constructs the replacement string literal text.
+
+        With ``block_indent`` (SQL passed to a call), the SQL lines and closing
+        quotes are indented by it; where the block starts and what follows it is
+        decided by the caller, see ``_layout_call_argument``.
+        """
         prefix = "f" if is_fstring else ""
-        if in_function and "\n" in formatted_sql:
-            indent = " " * self.config.indent_width
+        if block_indent is not None and "\n" in formatted_sql:
             lines = formatted_sql.split("\n")
-            indented_lines = [indent + line if line.strip() else line for line in lines]
-            indented_sql = "\n".join(indented_lines)
-            return f'\n{indent}{prefix}"""\n{indented_sql}\n{indent}"""\n'
+            indented_sql = "\n".join(
+                block_indent + line if line.strip() else line for line in lines
+            )
+            return f'{prefix}"""\n{indented_sql}\n{block_indent}"""'
         elif "\n" in formatted_sql:
             return f'{prefix}"""\n{formatted_sql}\n"""'
         else:
@@ -411,25 +530,67 @@ class SQLStringFormatter(ast.NodeVisitor):
         """Handles function calls."""
         func_name = self.get_full_func_name(node.func)
         if any(name in func_name for name in self.config.function_names):
-            for arg in node.args:
-                if isinstance(arg, (ast.Constant, ast.JoinedStr)):
-                    replacement_text = self.format_sql_node(arg, in_function=True)
-                    if replacement_text:
-                        start, end = node_offsets(arg, self.line_offsets)
-                        self.replacements.append(
-                            SQLReplacement(start, end, replacement_text)
-                        )
-            for keyword in node.keywords:
-                if isinstance(keyword.value, (ast.Constant, ast.JoinedStr)):
-                    replacement_text = self.format_sql_node(
-                        keyword.value, in_function=True
-                    )
-                    if replacement_text:
-                        start, end = node_offsets(keyword.value, self.line_offsets)
-                        self.replacements.append(
-                            SQLReplacement(start, end, replacement_text)
-                        )
+            values = [*node.args, *(keyword.value for keyword in node.keywords)]
+            for value in values:
+                if isinstance(value, (ast.Constant, ast.JoinedStr)):
+                    self._replace_call_argument(node, value)
         self.generic_visit(node)
+
+    def _replace_call_argument(
+        self, call: ast.Call, arg: ast.Constant | ast.JoinedStr
+    ) -> None:
+        """Formats a SQL argument, indented relative to the line the call starts on."""
+        call_line_start = self.line_offsets[call.lineno - 1]
+        call_line = self.source[call_line_start:].partition("\n")[0]
+        base_indent = call_line[: len(call_line) - len(call_line.lstrip())]
+        block_indent = base_indent + " " * self.config.indent_width
+
+        replacement = self.format_sql_node(arg, block_indent=block_indent)
+        if not replacement:
+            return
+        start, end = node_offsets(arg, self.line_offsets)
+        if "\n" in replacement:
+            start, end, replacement = self._layout_call_argument(
+                start, end, replacement, base_indent, block_indent
+            )
+        self.replacements.append(SQLReplacement(start, end, replacement))
+
+    def _layout_call_argument(
+        self,
+        start: int,
+        end: int,
+        block: str,
+        base_indent: str,
+        block_indent: str,
+    ) -> tuple[int, int, str]:
+        """Places a multi-line SQL block within its call.
+
+        - Already on its own line: normalize that line's indentation.
+        - First thing after ``(``: break after the paren.
+        - Otherwise (after a keyword or another argument): open the quotes in
+          place and leave what follows (e.g. the closing paren) after the
+          closing quotes.
+
+        In the first two cases a directly following ``)`` moves to its own line at
+        the call's indentation; other arguments stay after the closing quotes, so
+        code outside the string is never rewritten beyond whitespace.
+        """
+        line_start = self.source.rfind("\n", 0, start) + 1
+        before = self.source[line_start:start]
+        if not before.strip():
+            start, block = line_start, block_indent + block
+        elif before.rstrip().endswith("("):
+            start -= len(before) - len(before.rstrip())
+            block = "\n" + block_indent + block
+        else:
+            return start, end, block
+
+        after = self.source[end:]
+        rest = after.lstrip(" \t")
+        if rest.startswith(")"):
+            end += len(after) - len(rest)
+            block += "\n" + base_indent
+        return start, end, block
 
     @staticmethod
     def get_full_func_name(node: ast.AST) -> str:
@@ -460,7 +621,7 @@ def _has_skip_hint(source: str) -> bool:
 def format_cell_source(
     code: str,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
 ) -> str:
     """Format SQL in a single cell's source code.
@@ -487,7 +648,7 @@ def format_cell_source(
             continue
         if stripped.startswith("#"):
             continue
-        if stripped.startswith("%%sql") or stripped.startswith("%sql"):
+        if stripped.startswith(("%%sql", "%sql")):
             magic_cmd = stripped.split()[0]
             magic_cmd_index = idx
             break
@@ -534,7 +695,7 @@ def format_cell_source(
         return code
 
     line_offsets = build_line_offsets(code)
-    formatter = SQLStringFormatter(config, dialect, logger, line_offsets)
+    formatter = SQLStringFormatter(config, dialect, logger, line_offsets, code)
     formatter.visit(tree)
 
     if not formatter.replacements:
@@ -554,7 +715,7 @@ def format_cell_source(
 def _format_cells(
     notebook: nbformat.NotebookNode,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
 ) -> bool:
     """Format cells in-place. Returns True if any cell was modified."""
@@ -576,9 +737,9 @@ def _format_cells(
 def _format_python_source(
     source: str,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
-) -> Tuple[str, bool]:
+) -> tuple[str, bool]:
     """Format SQL strings in Python source code.
 
     Returns (formatted_source, changed) tuple.
@@ -596,7 +757,7 @@ def _format_python_source(
         return source, False
 
     line_offsets = build_line_offsets(source)
-    formatter = SQLStringFormatter(config, dialect, logger, line_offsets)
+    formatter = SQLStringFormatter(config, dialect, logger, line_offsets, source)
     formatter.visit(tree)
 
     if not formatter.replacements:
@@ -615,9 +776,9 @@ def _format_python_source(
 
 
 def process_notebook(
-    notebook_path: Union[str, Path],
+    notebook_path: str | Path,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
     check_only: bool = False,
 ) -> bool:
@@ -639,15 +800,15 @@ def process_notebook(
 
         return changed
 
-    except Exception as e:
-        logger.error(f"Failed to process notebook {notebook_path}: {e}", exc_info=True)
+    except Exception:
+        logger.exception(f"Failed to process notebook {notebook_path}")
         raise
 
 
 def diff_notebook(
-    notebook_path: Union[str, Path],
+    notebook_path: str | Path,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
 ) -> str:
     """Returns a unified diff of formatting changes for a notebook."""
@@ -675,9 +836,9 @@ def diff_notebook(
 
 
 def process_python_file(
-    file_path: Union[str, Path],
+    file_path: str | Path,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
     check_only: bool = False,
 ) -> bool:
@@ -696,15 +857,15 @@ def process_python_file(
 
         return changed
 
-    except Exception as e:
-        logger.error(f"Failed to process file {file_path}: {e}", exc_info=True)
+    except Exception:
+        logger.exception(f"Failed to process file {file_path}")
         raise
 
 
 def diff_python_file(
-    file_path: Union[str, Path],
+    file_path: str | Path,
     config: FormattingConfig,
-    dialect: Optional[str],
+    dialect: str | None,
     logger: logging.Logger,
 ) -> str:
     """Returns a unified diff of formatting changes for a Python file."""
@@ -725,6 +886,16 @@ def diff_python_file(
     )
 
 
+def _dialect_arg(value: str) -> str:
+    """argparse type for --dialect: rejects unknown dialects up front."""
+    import argparse
+
+    try:
+        return validate_dialect(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
+
+
 def main():
     """Main entry point for the SQL formatter."""
     import argparse
@@ -739,10 +910,17 @@ def main():
         help="Notebook (.ipynb) or Python (.py) file paths to process",
     )
     parser.add_argument(
-        "--config", type=Path, default=None, help="Configuration file path (optional)"
+        "--config",
+        type=Path,
+        default=None,
+        help="Configuration file path: YAML, or a pyproject.toml with a "
+        "[tool.sqlnbfmt] table (optional; by default the nearest pyproject.toml "
+        "with that table is used)",
     )
     parser.add_argument(
-        "--dialect", type=str, help="SQL dialect (e.g., mysql, postgres)"
+        "--dialect",
+        type=_dialect_arg,
+        help="SQL dialect (e.g., mysql, postgres); overrides the configured dialect",
     )
     parser.add_argument(
         "--log-level",
@@ -764,13 +942,22 @@ def main():
     args = parser.parse_args()
     logger = setup_logging(args.log_level)
 
+    config_path = args.config
     try:
-        config = load_config(args.config)
+        if config_path is None:
+            config_path = find_pyproject_config()
+        config = load_config(config_path)
     except FileNotFoundError as e:
         logger.error(
             f"{e}\nHint: --config is optional; omit it to use built-in defaults."
         )
         sys.exit(1)
+    except (ConfigError, yaml.YAMLError) as e:
+        location = f" in {config_path}" if config_path else ""
+        logger.error(f"Invalid configuration{location}: {e}")
+        sys.exit(1)
+    logger.debug(f"Using configuration from {config_path or 'built-in defaults'}")
+    dialect = args.dialect or config.dialect
 
     try:
         changed_files = []
@@ -780,11 +967,9 @@ def main():
 
             if args.check or args.diff:
                 if is_python:
-                    diff_output = diff_python_file(
-                        file_path, config, args.dialect, logger
-                    )
+                    diff_output = diff_python_file(file_path, config, dialect, logger)
                 else:
-                    diff_output = diff_notebook(file_path, config, args.dialect, logger)
+                    diff_output = diff_notebook(file_path, config, dialect, logger)
                 needs_formatting = bool(diff_output)
 
                 if args.diff and diff_output:
@@ -794,11 +979,9 @@ def main():
                     changed_files.append(file_path)
             else:
                 if is_python:
-                    changed = process_python_file(
-                        file_path, config, args.dialect, logger
-                    )
+                    changed = process_python_file(file_path, config, dialect, logger)
                 else:
-                    changed = process_notebook(file_path, config, args.dialect, logger)
+                    changed = process_notebook(file_path, config, dialect, logger)
                 if changed:
                     changed_files.append(file_path)
 
@@ -823,7 +1006,7 @@ def main():
 
         sys.exit(0)
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - CLI boundary: report and exit non-zero
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
 

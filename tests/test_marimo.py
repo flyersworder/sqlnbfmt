@@ -85,7 +85,7 @@ _df = mo.sql(f"select * from {table} where active = 1")
 """
     config = load_config()
     result1, _ = _format_python_source(source, config, "mysql", logger)
-    result2, changed2 = _format_python_source(result1, config, "mysql", logger)
+    _result2, changed2 = _format_python_source(result1, config, "mysql", logger)
     assert not changed2
 
 
@@ -96,7 +96,7 @@ import marimo as mo
 _df = mo.sql(f"select id, name from users where active = 1")
 """
     config = load_config()
-    result, changed = _format_python_source(source, config, "mysql", logger)
+    _result, changed = _format_python_source(source, config, "mysql", logger)
     assert not changed
 
 
@@ -212,6 +212,7 @@ _df = mo.sql(f"select id, name from users where active = 1")
     result = subprocess.run(
         ["sqlnbfmt", str(py_path)],
         capture_output=True,
+        check=False,
         text=True,
     )
     assert result.returncode == 0
@@ -230,6 +231,7 @@ _df = mo.sql(f"select id, name from users where active = 1")
     result = subprocess.run(
         ["sqlnbfmt", "--check", str(py_path)],
         capture_output=True,
+        check=False,
         text=True,
     )
     assert result.returncode == 1
@@ -246,6 +248,7 @@ _df = mo.sql(f"select id, name from users where active = 1")
     result = subprocess.run(
         ["sqlnbfmt", "--diff", str(py_path)],
         capture_output=True,
+        check=False,
         text=True,
     )
     assert result.returncode == 0
@@ -273,6 +276,7 @@ _df = mo.sql(f"select id from users where active = 1")
     result = subprocess.run(
         ["sqlnbfmt", str(nb_path), str(py_path)],
         capture_output=True,
+        check=False,
         text=True,
     )
     assert result.returncode == 0
