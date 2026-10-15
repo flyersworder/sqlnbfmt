@@ -2,6 +2,7 @@
 
 import ast
 import logging
+import warnings
 
 import pytest
 
@@ -116,3 +117,20 @@ def test_custom_decorators_via_config(tmp_path, config_format):
         path = tmp_path / "config.yaml"
         path.write_text("sql_decorators:\n  - warehouse\n")
     assert "SELECT" in fmt(source, load_config(path))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # From the #31 review: these used to produce invalid Python or change values
+        '@query\ndef f():\n    return "select a, b from t where c = 1 -- trailing \\"\\"\\"x"\n',
+        "@query\ndef f():\n    return \"select a, b from t where c = '\\\\n' and d = 1\"\n",
+        "@query(r\"select a from t where b like '%\\_%' and c = 1\")\ndef f(): ...\n",
+    ],
+)
+def test_decorated_strings_are_written_back_faithfully(source):
+    formatted = fmt(source)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ast.parse(formatted)
+    assert fmt(formatted) == formatted

@@ -425,7 +425,10 @@ class SQLStringFormatter(ast.NodeVisitor):
         self.source = source
         self.replacements: list = []
         self.changed = False
-        # ids of decorator calls matching sql_decorators, e.g. @query("SELECT ...")
+        # ids of decorator calls matching sql_decorators, e.g. @query("SELECT ..."),
+        # recorded by visit_FunctionDef/visit_ClassDef before generic_visit
+        # reaches them. visit_Call then formats their arguments, so each call is
+        # handled in one place even if it also matches function_names.
         self._sql_decorator_calls: set[int] = set()
 
     def is_likely_sql(self, code: str) -> bool:
@@ -614,13 +617,17 @@ class SQLStringFormatter(ast.NodeVisitor):
             return placeholders(parsed) == placeholders(node)
         return isinstance(parsed, ast.Constant) and parsed.value == value
 
+    def _replace_string(self, value: ast.expr | None) -> None:
+        """Formats a string literal in place (assigned or returned SQL)."""
+        if isinstance(value, (ast.Constant, ast.JoinedStr)):
+            replacement_text = self.format_sql_node(value)
+            if replacement_text:
+                start, end = node_offsets(value, self.line_offsets)
+                self.replacements.append(SQLReplacement(start, end, replacement_text))
+
     def visit_Assign(self, node: ast.Assign) -> None:
         """Handles assignments."""
-        if isinstance(node.value, (ast.Constant, ast.JoinedStr)):
-            replacement_text = self.format_sql_node(node.value)
-            if replacement_text:
-                start, end = node_offsets(node.value, self.line_offsets)
-                self.replacements.append(SQLReplacement(start, end, replacement_text))
+        self._replace_string(node.value)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -675,13 +682,7 @@ class SQLStringFormatter(ast.NodeVisitor):
         """Formats SQL returned by functions decorated with an SQL decorator."""
         if self._register_sql_decorators(node):
             for ret in self._own_returns(node):
-                if isinstance(ret.value, (ast.Constant, ast.JoinedStr)):
-                    replacement_text = self.format_sql_node(ret.value)
-                    if replacement_text:
-                        start, end = node_offsets(ret.value, self.line_offsets)
-                        self.replacements.append(
-                            SQLReplacement(start, end, replacement_text)
-                        )
+                self._replace_string(ret.value)
         self.generic_visit(node)
 
     visit_AsyncFunctionDef = visit_FunctionDef
