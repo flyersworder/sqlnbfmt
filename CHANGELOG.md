@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Rewritten SQL strings could corrupt the code.** When writing formatted SQL back, sqlnbfmt now keeps the value of the string exactly. In particular:
+  - backslash escapes are preserved (`'\\n'` used to become a real newline)
+  - the raw `r` prefix is kept (dropping it turned `\_` into an invalid escape)
+  - quotes are chosen so they don't clash with the SQL (`cursor.execute('delete from "users"')` produced broken Python, as did `"""` inside the SQL)
+  - literal `{{ }}` braces in f-strings are no longer turned into placeholders
+
+  Each rewritten literal is parsed back and checked; a string that can't be written back faithfully is left unchanged
 - `sql_keywords` entries are now case-insensitive. SQL detection compares against upper-cased code, so a lowercase entry such as `"merge"` was silently never matched
 - Blank entries in `sql_keywords`, `function_names` and `sql_decorators` (and their `extend_*` forms) are rejected. Function names match as substrings, so `""` matched every call
 
