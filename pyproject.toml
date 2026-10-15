@@ -56,4 +56,9 @@ markers = [
 "jupyter-config/sqlnbfmt.json" = "etc/jupyter/jupyter_server_config.d/sqlnbfmt.json"
 
 [tool.ruff]
-extend-exclude = ["tests/eval/*/"]
+# Eval cases and test notebooks are fixtures: their exact formatting is the test input.
+extend-exclude = ["tests/eval/*/", "tests/*.ipynb"]
+
+[tool.ruff.format]
+# Code blocks in docs show sqlnbfmt's own output, not ruff's.
+exclude = ["*.md"]
