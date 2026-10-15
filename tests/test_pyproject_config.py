@@ -366,3 +366,36 @@ def test_lists_reject_blank_entries(tmp_path, key, value):
     path = _write_config(tmp_path, "toml", {key: ["read_sql", value]})
     with pytest.raises(ValueError, match=key):
         load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("config_format", "text"),
+    [
+        ("toml", "[tool.sqlnbfmt.formatting_options]\nsingle_line_threshold = 120\n"),
+        ("yaml", "formatting_options:\n  single_line_threshold: 120\n"),
+    ],
+)
+def test_single_line_threshold_is_deprecated(tmp_path, caplog, config_format, text):
+    """It never had any effect; setting it warns but still loads."""
+    caplog.set_level(logging.WARNING, logger="formatter")
+    path = tmp_path / ("pyproject.toml" if config_format == "toml" else "config.yaml")
+    path.write_text(text)
+    load_config(path)
+    assert "single_line_threshold' is deprecated and has no effect" in caplog.text
+    assert "unknown" not in caplog.text
+
+
+def test_no_deprecation_warning_when_unset(tmp_path, caplog):
+    caplog.set_level(logging.WARNING, logger="formatter")
+    path = tmp_path / "pyproject.toml"
+    path.write_text("[tool.sqlnbfmt.formatting_options]\nindent_width = 2\n")
+    load_config(path)
+    assert caplog.text == ""
+
+
+def test_config_template_does_not_use_deprecated_options(caplog):
+    from pathlib import Path
+
+    caplog.set_level(logging.WARNING, logger="formatter")
+    load_config(Path(__file__).parent.parent / "config.yaml")
+    assert caplog.text == ""

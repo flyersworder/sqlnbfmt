@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `extend_sql_keywords`, `extend_function_names` and `extend_sql_decorators` config options, which add entries to the built-in lists instead of replacing them, so adding one function name no longer drops defaults like `sql` (Marimo's `mo.sql()`) ([#26](https://github.com/flyersworder/sqlnbfmt/issues/26))
 - The unknown-option warning suggests the intended option for kebab-case keys (e.g. `extend-function-names`, `indent-width`), at the top level and under `formatting_options`
 
+### Deprecated
+
+- `formatting_options.single_line_threshold`: it was documented as the maximum length before splitting SQL, but no version ever read it; line breaks are decided by sqlglot. Setting it now logs a warning, and it will be removed in a future release
+
 ### Fixed
 
 - **Rewritten SQL strings could corrupt the code.** When writing formatted SQL back, sqlnbfmt now keeps the value of the string exactly. In particular:

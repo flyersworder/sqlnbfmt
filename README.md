@@ -164,7 +164,7 @@ When `--config` is given, `pyproject.toml` discovery is skipped. Options you don
 | `function_names` | Python functions containing SQL code (see [matching](#how-function-names-match)) | `read_sql`, `execute`, `sql` (Marimo's `mo.sql`), etc. |
 | `sql_decorators` | Decorators indicating SQL code | `query`, `sql_query`, etc. |
 | `extend_sql_keywords`, `extend_function_names`, `extend_sql_decorators` | Entries added to the corresponding list instead of replacing it | none |
-| `formatting_options.single_line_threshold` | Maximum length before splitting SQL | 80 |
+| `formatting_options.single_line_threshold` | **Deprecated:** never had any effect and will be removed. Line breaks are decided by sqlglot | |
 | `formatting_options.indent_width` | Number of spaces for indentation | 4 |
 
 To add to the built-in lists, use the `extend_*` options. `sql_keywords`, `function_names` and `sql_decorators` **replace** the built-in lists, so setting `function_names = ["run_query"]` drops `sql`, and Marimo's `mo.sql()` calls stop being formatted. If you do replace a list, copy the defaults you still rely on from the [template](https://github.com/flyersworder/sqlnbfmt/blob/main/config.yaml). You can set both: the `extend_*` entries are added to your replacement list.
