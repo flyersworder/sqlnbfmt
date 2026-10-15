@@ -141,6 +141,7 @@ Use `--check` in GitHub Actions to enforce formatting:
 ```toml
 [tool.sqlnbfmt]
 dialect = "postgres"
+extend_function_names = ["run_query"]  # recognized in addition to the defaults
 
 [tool.sqlnbfmt.formatting_options]
 indent_width = 2
@@ -162,10 +163,11 @@ When `--config` is given, `pyproject.toml` discovery is skipped. Options you don
 | `sql_keywords` | SQL keywords to recognize and format | Common SQL keywords |
 | `function_names` | Python functions containing SQL code (see [matching](#how-function-names-match)) | `read_sql`, `execute`, `sql` (Marimo's `mo.sql`), etc. |
 | `sql_decorators` | Decorators indicating SQL code | `query`, `sql_query`, etc. |
+| `extend_sql_keywords`, `extend_function_names`, `extend_sql_decorators` | Entries added to the corresponding list instead of replacing it | none |
 | `formatting_options.single_line_threshold` | Maximum length before splitting SQL | 80 |
 | `formatting_options.indent_width` | Number of spaces for indentation | 4 |
 
-`sql_keywords`, `function_names` and `sql_decorators` **replace** the built-in lists rather than extending them. Copy the defaults you still rely on from the [template](https://github.com/flyersworder/sqlnbfmt/blob/main/config.yaml); for example, keep `sql` in `function_names` or Marimo's `mo.sql()` calls stop being formatted.
+To add to the built-in lists, use the `extend_*` options. `sql_keywords`, `function_names` and `sql_decorators` **replace** the built-in lists, so setting `function_names = ["run_query"]` drops `sql`, and Marimo's `mo.sql()` calls stop being formatted. If you do replace a list, copy the defaults you still rely on from the [template](https://github.com/flyersworder/sqlnbfmt/blob/main/config.yaml). You can set both: the `extend_*` entries are added to your replacement list.
 
 ### How function names match
 
@@ -237,7 +239,7 @@ def _(mo):
 
 **SQL not being formatted?**
 - Ensure the string contains at least 2 SQL keywords or a recognizable pattern like `SELECT...FROM`
-- Check that the function name is in the recognized list (add custom ones via `function_names` in `[tool.sqlnbfmt]` or `--config`)
+- Check that the function name is in the recognized list (add custom ones via `extend_function_names` in `[tool.sqlnbfmt]` or your `--config` file)
 
 **Comments being modified?**
 - Python comments (`#`) are preserved. SQL comments (`--`) inside strings are converted to `/* */` block comments by sqlglot.
