@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `extend_sql_keywords`, `extend_function_names` and `extend_sql_decorators` config options, which add entries to the built-in lists instead of replacing them, so adding one function name no longer drops defaults like `sql` (Marimo's `mo.sql()`) ([#26](https://github.com/flyersworder/sqlnbfmt/issues/26))
+- The unknown-option warning suggests the snake_case spelling for kebab-case keys (e.g. `extend-function-names`)
+
 ## [0.5.0] - 2026-10-15
 
 ### Added

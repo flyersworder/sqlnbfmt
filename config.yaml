@@ -28,6 +28,11 @@ sql_keywords:
   - OFFSET
   - DISTINCT
 
+# To add to the defaults instead of replacing them, use extend_function_names
+# (and extend_sql_keywords / extend_sql_decorators), e.g.:
+# extend_function_names:
+#   - run_query
+
 function_names:
   - read_sql
   - read_sql_query

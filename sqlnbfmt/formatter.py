@@ -119,6 +119,13 @@ def _string_set(config: dict, key: str, default: frozenset[str]) -> set[str]:
     return set(value)
 
 
+def _extended_string_set(config: dict, key: str, default: frozenset[str]) -> set[str]:
+    """``key`` (or the defaults) plus anything listed under ``extend_<key>``."""
+    return _string_set(config, key, default) | _string_set(
+        config, f"extend_{key}", frozenset()
+    )
+
+
 def _integer(options: dict, key: str, default: int) -> int:
     value = options.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int):
@@ -148,12 +155,12 @@ def _optional_dialect(config: dict) -> str | None:
         raise ConfigError(str(e)) from e
 
 
+_LIST_KEYS = ("sql_keywords", "function_names", "sql_decorators")
 _TOP_LEVEL_KEYS = {
     "dialect",
-    "sql_keywords",
-    "function_names",
-    "sql_decorators",
     "formatting_options",
+    *_LIST_KEYS,
+    *(f"extend_{key}" for key in _LIST_KEYS),
 }
 _FORMATTING_KEYS = {"single_line_threshold", "indent_width"}
 
@@ -162,11 +169,12 @@ def _warn_unknown_keys(config: dict, options: dict) -> None:
     """Warns about unrecognized options, which would otherwise be silently ignored."""
     logger = logging.getLogger("formatter")
     for key in config.keys() - _TOP_LEVEL_KEYS:
-        hint = (
-            f" (did you mean 'formatting_options.{key}'?)"
-            if key in _FORMATTING_KEYS
-            else ""
-        )
+        if key in _FORMATTING_KEYS:
+            hint = f" (did you mean 'formatting_options.{key}'?)"
+        elif key.replace("-", "_") in _TOP_LEVEL_KEYS:
+            hint = f" (did you mean '{key.replace('-', '_')}'?)"
+        else:
+            hint = ""
         logger.warning(f"Ignoring unknown configuration option '{key}'{hint}")
     for key in options.keys() - _FORMATTING_KEYS:
         logger.warning(
@@ -183,9 +191,13 @@ def _config_from_dict(config: dict) -> FormattingConfig:
         raise ConfigError(f"'formatting_options' must be a mapping, got {options!r}")
     _warn_unknown_keys(config, options)
     return FormattingConfig(
-        sql_keywords=_string_set(config, "sql_keywords", DEFAULT_SQL_KEYWORDS),
-        function_names=_string_set(config, "function_names", DEFAULT_FUNCTION_NAMES),
-        sql_decorators=_string_set(config, "sql_decorators", DEFAULT_SQL_DECORATORS),
+        sql_keywords=_extended_string_set(config, "sql_keywords", DEFAULT_SQL_KEYWORDS),
+        function_names=_extended_string_set(
+            config, "function_names", DEFAULT_FUNCTION_NAMES
+        ),
+        sql_decorators=_extended_string_set(
+            config, "sql_decorators", DEFAULT_SQL_DECORATORS
+        ),
         single_line_threshold=_integer(options, "single_line_threshold", 80),
         indent_width=_integer(options, "indent_width", 4),
         dialect=_optional_dialect(config),

@@ -1,10 +1,17 @@
+import json
 import os
 import subprocess
 import tomllib
 
 import pytest
 
-from sqlnbfmt.formatter import find_pyproject_config, load_config
+from sqlnbfmt.formatter import (
+    DEFAULT_FUNCTION_NAMES,
+    DEFAULT_SQL_DECORATORS,
+    DEFAULT_SQL_KEYWORDS,
+    find_pyproject_config,
+    load_config,
+)
 
 PYPROJECT_WITH_TOOL = """\
 [project]
@@ -242,3 +249,88 @@ def test_cli_rejects_unknown_dialect_flag(repo):
     result = _run_check(repo, "--dialect", "postgress")
     assert result.returncode == 2
     assert "Did you mean postgres" in result.stderr
+
+
+# --- extend_* options (#26) ------------------------------------------------
+
+
+def _write_config(tmp_path, fmt, options):
+    """Writes ``options`` (key -> list of strings) as a pyproject.toml or YAML config."""
+    if fmt == "toml":
+        lines = [f"{key} = {json.dumps(value)}" for key, value in options.items()]
+        path = tmp_path / "pyproject.toml"
+        path.write_text("[tool.sqlnbfmt]\n" + "\n".join(lines) + "\n")
+    else:
+        lines = [f"{key}: {json.dumps(value)}" for key, value in options.items()]
+        path = tmp_path / "config.yaml"
+        path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+@pytest.fixture(params=["toml", "yaml"])
+def config_format(request):
+    return request.param
+
+
+def test_extend_adds_to_defaults(tmp_path, config_format):
+    path = _write_config(
+        tmp_path,
+        config_format,
+        {
+            "extend_function_names": ["run_query"],
+            "extend_sql_decorators": ["warehouse_query"],
+            "extend_sql_keywords": ["QUALIFY"],
+        },
+    )
+    config = load_config(path)
+    assert config.function_names == set(DEFAULT_FUNCTION_NAMES) | {"run_query"}
+    assert config.sql_decorators == set(DEFAULT_SQL_DECORATORS) | {"warehouse_query"}
+    assert config.sql_keywords == set(DEFAULT_SQL_KEYWORDS) | {"QUALIFY"}
+
+
+def test_extend_adds_to_replaced_list(tmp_path, config_format):
+    path = _write_config(
+        tmp_path,
+        config_format,
+        {"function_names": ["read_sql"], "extend_function_names": ["run_query"]},
+    )
+    assert load_config(path).function_names == {"read_sql", "run_query"}
+
+
+def test_extend_rejects_wrong_type(tmp_path, config_format):
+    path = _write_config(
+        tmp_path, config_format, {"extend_function_names": "run_query"}
+    )
+    with pytest.raises(ValueError, match="extend_function_names"):
+        load_config(path)
+
+
+def test_extend_keys_are_not_reported_as_unknown(tmp_path, caplog):
+    path = _write_config(tmp_path, "toml", {"extend_function_names": ["run_query"]})
+    load_config(path)
+    assert "unknown" not in caplog.text
+
+
+def test_kebab_case_key_suggests_snake_case(tmp_path, caplog):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[tool.sqlnbfmt]\nextend-function-names = ["run_query"]\n')
+    config = load_config(pyproject)
+    assert "run_query" not in config.function_names
+    assert "did you mean 'extend_function_names'" in caplog.text
+
+
+def test_extend_keeps_marimo_formatting(tmp_path):
+    """The point of #26: adding a function doesn't drop `sql` (mo.sql)."""
+    import logging
+
+    from sqlnbfmt.formatter import _format_python_source
+
+    path = _write_config(tmp_path, "toml", {"extend_function_names": ["pull_rows"]})
+    source = (
+        'def _(mo):\n    _df = mo.sql(f"select id from users limit 5")\n'
+        'pull_rows("select id from users limit 5")\n'
+    )
+    formatted, _ = _format_python_source(
+        source, load_config(path), None, logging.getLogger("test")
+    )
+    assert formatted.count("LIMIT 5") == 2
