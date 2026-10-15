@@ -116,7 +116,17 @@ def _string_set(config: dict, key: str, default: frozenset[str]) -> set[str]:
         isinstance(item, str) for item in value
     ):
         raise ConfigError(f"'{key}' must be a list of strings, got {value!r}")
+    if any(not item.strip() for item in value):
+        # Names match as substrings, so a blank entry would match everything
+        raise ConfigError(f"'{key}' must not contain blank entries, got {value!r}")
     return set(value)
+
+
+def _extended_string_set(config: dict, key: str, default: frozenset[str]) -> set[str]:
+    """``key`` (or the defaults) plus anything listed under ``extend_<key>``."""
+    return _string_set(config, key, default) | _string_set(
+        config, f"extend_{key}", frozenset()
+    )
 
 
 def _integer(options: dict, key: str, default: int) -> int:
@@ -148,30 +158,40 @@ def _optional_dialect(config: dict) -> str | None:
         raise ConfigError(str(e)) from e
 
 
+_LIST_KEYS = ("sql_keywords", "function_names", "sql_decorators")
 _TOP_LEVEL_KEYS = {
     "dialect",
-    "sql_keywords",
-    "function_names",
-    "sql_decorators",
     "formatting_options",
+    *_LIST_KEYS,
+    *(f"extend_{key}" for key in _LIST_KEYS),
 }
 _FORMATTING_KEYS = {"single_line_threshold", "indent_width"}
+
+
+def _suggest_key(key: str) -> str | None:
+    """The full name of a known option that ``key`` likely meant, if any.
+
+    Catches kebab-case spellings and formatting options placed at the wrong level.
+    """
+    normalized = key.replace("-", "_")
+    if normalized in _TOP_LEVEL_KEYS:
+        return normalized
+    if normalized in _FORMATTING_KEYS:
+        return f"formatting_options.{normalized}"
+    return None
 
 
 def _warn_unknown_keys(config: dict, options: dict) -> None:
     """Warns about unrecognized options, which would otherwise be silently ignored."""
     logger = logging.getLogger("formatter")
-    for key in config.keys() - _TOP_LEVEL_KEYS:
-        hint = (
-            f" (did you mean 'formatting_options.{key}'?)"
-            if key in _FORMATTING_KEYS
-            else ""
-        )
-        logger.warning(f"Ignoring unknown configuration option '{key}'{hint}")
-    for key in options.keys() - _FORMATTING_KEYS:
-        logger.warning(
-            f"Ignoring unknown configuration option 'formatting_options.{key}'"
-        )
+    unknown = [(key, key) for key in config.keys() - _TOP_LEVEL_KEYS]
+    unknown += [
+        (key, f"formatting_options.{key}") for key in options.keys() - _FORMATTING_KEYS
+    ]
+    for key, full_name in unknown:
+        suggestion = _suggest_key(key)
+        hint = f" (did you mean '{suggestion}'?)" if suggestion else ""
+        logger.warning(f"Ignoring unknown configuration option '{full_name}'{hint}")
 
 
 def _config_from_dict(config: dict) -> FormattingConfig:
@@ -183,9 +203,19 @@ def _config_from_dict(config: dict) -> FormattingConfig:
         raise ConfigError(f"'formatting_options' must be a mapping, got {options!r}")
     _warn_unknown_keys(config, options)
     return FormattingConfig(
-        sql_keywords=_string_set(config, "sql_keywords", DEFAULT_SQL_KEYWORDS),
-        function_names=_string_set(config, "function_names", DEFAULT_FUNCTION_NAMES),
-        sql_decorators=_string_set(config, "sql_decorators", DEFAULT_SQL_DECORATORS),
+        # is_likely_sql matches keywords against upper-cased code
+        sql_keywords={
+            keyword.upper()
+            for keyword in _extended_string_set(
+                config, "sql_keywords", DEFAULT_SQL_KEYWORDS
+            )
+        },
+        function_names=_extended_string_set(
+            config, "function_names", DEFAULT_FUNCTION_NAMES
+        ),
+        sql_decorators=_extended_string_set(
+            config, "sql_decorators", DEFAULT_SQL_DECORATORS
+        ),
         single_line_threshold=_integer(options, "single_line_threshold", 80),
         indent_width=_integer(options, "indent_width", 4),
         dialect=_optional_dialect(config),

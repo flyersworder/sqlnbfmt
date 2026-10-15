@@ -51,6 +51,7 @@ version = "0.0.0"
 
 [tool.sqlnbfmt]
 dialect = "tsql"
+extend_function_names = ["pull_rows"]
 """
 
 MARIMO_APP = '''\
@@ -62,6 +63,12 @@ app = marimo.App()
 @app.cell
 def _(mo):
     _df = mo.sql(f"""select id, name from users where active = 1 order by name limit 5""")
+    return
+
+
+@app.cell
+def _():
+    pull_rows("select id from orders limit 7")
     return
 '''
 
@@ -137,6 +144,8 @@ def test_cli_formats_with_discovered_pyproject_config(venv_bin, project):
     cells = notebook_sources(notebooks / "analysis.ipynb")
 
     assert "TOP 5" in marimo and "TOP 20" in cells[0] and "TOP 3" in cells[1]
+    # extend_function_names adds pull_rows without dropping the default `sql` (mo.sql)
+    assert "TOP 7" in marimo
     assert cells[2] == NOTEBOOK_CELLS[2]  # non-SQL untouched
     ast.parse(marimo)
     # The SQL block is indented under mo.sql( and the paren returns to the call's level
