@@ -134,9 +134,25 @@ Use `--check` in GitHub Actions to enforce formatting:
 
 ## Configuration
 
-`sqlnbfmt` works without any configuration file. A `config.yaml` is only needed to override defaults.
+`sqlnbfmt` works without any configuration. To override defaults, use a `[tool.sqlnbfmt]` table in `pyproject.toml` or a separate YAML file.
 
-Create a `config.yaml` file to customize formatting behavior. [Here](https://github.com/flyersworder/sqlnbfmt/blob/main/config.yaml) is a template.
+### pyproject.toml
+
+```toml
+[tool.sqlnbfmt]
+function_names = ["read_sql", "execute", "run_query"]
+
+[tool.sqlnbfmt.formatting_options]
+indent_width = 2
+```
+
+`sqlnbfmt` searches the current directory and its parents for the nearest `pyproject.toml` with a `[tool.sqlnbfmt]` table, stopping at the repository root (the directory containing `.git`). A `pyproject.toml` without that table is skipped, so a sub-package's file doesn't hide the repository-level configuration. The JupyterLab integration does the same, starting from the Jupyter server's working directory.
+
+### YAML file
+
+Pass a YAML file with `--config config.yaml`. [Here](https://github.com/flyersworder/sqlnbfmt/blob/main/config.yaml) is a template. `--config` also accepts a `.toml` path, which is read from its `[tool.sqlnbfmt]` table.
+
+When `--config` is given, `pyproject.toml` discovery is skipped. Options you don't set keep their defaults, and unknown option names produce a warning.
 
 ### Configuration Options
 
@@ -145,8 +161,8 @@ Create a `config.yaml` file to customize formatting behavior. [Here](https://git
 | `sql_keywords` | SQL keywords to recognize and format | Common SQL keywords |
 | `function_names` | Python functions containing SQL code | `read_sql`, `execute`, etc. |
 | `sql_decorators` | Decorators indicating SQL code | `query`, `sql_query`, etc. |
-| `single_line_threshold` | Maximum length before splitting SQL | 80 |
-| `indent_width` | Number of spaces for indentation | 4 |
+| `formatting_options.single_line_threshold` | Maximum length before splitting SQL | 80 |
+| `formatting_options.indent_width` | Number of spaces for indentation | 4 |
 
 ## Examples
 
@@ -208,7 +224,7 @@ def _(mo):
 
 **SQL not being formatted?**
 - Ensure the string contains at least 2 SQL keywords or a recognizable pattern like `SELECT...FROM`
-- Check that the function name is in the recognized list (use `--config` to add custom ones)
+- Check that the function name is in the recognized list (add custom ones via `function_names` in `[tool.sqlnbfmt]` or `--config`)
 
 **Comments being modified?**
 - Python comments (`#`) are preserved. SQL comments (`--`) inside strings are converted to `/* */` block comments by sqlglot.

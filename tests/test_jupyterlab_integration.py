@@ -74,3 +74,29 @@ def test_formatter_class_format_code():
         code = "x = 42\nprint(x)"
         result = formatter.format_code(code, notebook=True)
         assert result == code
+
+
+def test_register_discovers_pyproject_config(tmp_path, monkeypatch):
+    """register() without config_path uses [tool.sqlnbfmt] from pyproject.toml."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.sqlnbfmt.formatting_options]\nindent_width = 2\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    mock_formatters = {}
+    mock_base = type("BaseFormatter", (), {})
+
+    with patch.dict(
+        "sys.modules",
+        {
+            "jupyterlab_code_formatter": MagicMock(),
+            "jupyterlab_code_formatter.formatters": MagicMock(
+                BaseFormatter=mock_base,
+                SERVER_FORMATTERS=mock_formatters,
+            ),
+        },
+    ):
+        from sqlnbfmt.jupyterlab_integration import register
+
+        register()
+        assert mock_formatters["sqlnbfmt"]._config.indent_width == 2

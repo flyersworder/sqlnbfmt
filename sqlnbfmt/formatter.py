@@ -5,6 +5,7 @@ import logging
 import re
 import sys
 import textwrap
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -91,6 +92,10 @@ class SQLFormattingError(Exception):
     """Custom exception for SQL formatting errors."""
 
 
+class ConfigError(ValueError):
+    """Raised when a configuration file is malformed or has invalid values."""
+
+
 def setup_logging(level: str = "INFO") -> logging.Logger:
     """Sets up logging with the specified level."""
     logger = logging.getLogger("formatter")
@@ -103,8 +108,98 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
     return logger
 
 
+def _string_set(config: dict, key: str, default: frozenset[str]) -> set[str]:
+    value = config.get(key, default)
+    if not isinstance(value, list | tuple | set | frozenset) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ConfigError(f"'{key}' must be a list of strings, got {value!r}")
+    return set(value)
+
+
+def _integer(options: dict, key: str, default: int) -> int:
+    value = options.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"'{key}' must be an integer, got {value!r}")
+    return value
+
+
+_TOP_LEVEL_KEYS = {
+    "sql_keywords",
+    "function_names",
+    "sql_decorators",
+    "formatting_options",
+}
+_FORMATTING_KEYS = {"single_line_threshold", "indent_width"}
+
+
+def _warn_unknown_keys(config: dict, options: dict) -> None:
+    """Warns about unrecognized options, which would otherwise be silently ignored."""
+    logger = logging.getLogger("formatter")
+    for key in config.keys() - _TOP_LEVEL_KEYS:
+        hint = (
+            f" (did you mean 'formatting_options.{key}'?)"
+            if key in _FORMATTING_KEYS
+            else ""
+        )
+        logger.warning(f"Ignoring unknown configuration option '{key}'{hint}")
+    for key in options.keys() - _FORMATTING_KEYS:
+        logger.warning(
+            f"Ignoring unknown configuration option 'formatting_options.{key}'"
+        )
+
+
+def _config_from_dict(config: dict) -> FormattingConfig:
+    """Builds a FormattingConfig from a parsed YAML document or [tool.sqlnbfmt] table."""
+    if not isinstance(config, dict):
+        raise ConfigError(f"configuration must be a mapping, got {config!r}")
+    options = config.get("formatting_options", {})
+    if not isinstance(options, dict):
+        raise ConfigError(f"'formatting_options' must be a mapping, got {options!r}")
+    _warn_unknown_keys(config, options)
+    return FormattingConfig(
+        sql_keywords=_string_set(config, "sql_keywords", DEFAULT_SQL_KEYWORDS),
+        function_names=_string_set(config, "function_names", DEFAULT_FUNCTION_NAMES),
+        sql_decorators=_string_set(config, "sql_decorators", DEFAULT_SQL_DECORATORS),
+        single_line_threshold=_integer(options, "single_line_threshold", 80),
+        indent_width=_integer(options, "indent_width", 4),
+    )
+
+
+def _read_pyproject_table(pyproject: Path) -> dict | None:
+    """Returns the [tool.sqlnbfmt] table of a pyproject.toml, or None if absent."""
+    try:
+        with open(pyproject, "rb") as file:
+            data = tomllib.load(file)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"Could not parse {pyproject}: {e}") from e
+    return data.get("tool", {}).get("sqlnbfmt")
+
+
+def find_pyproject_config(start: str | Path | None = None) -> Path | None:
+    """Finds the nearest pyproject.toml with a [tool.sqlnbfmt] table.
+
+    Searches ``start`` (default: the current directory) and its parents, stopping
+    after the repository root (a directory containing ``.git``) or the filesystem
+    root. Files without a [tool.sqlnbfmt] table are skipped, so a sub-package's
+    pyproject.toml doesn't hide the repository-level configuration.
+    """
+    directory = Path(start or Path.cwd()).resolve()
+    for candidate in (directory, *directory.parents):
+        pyproject = candidate / "pyproject.toml"
+        if pyproject.is_file() and _read_pyproject_table(pyproject) is not None:
+            return pyproject
+        if (candidate / ".git").exists():
+            break
+    return None
+
+
 def load_config(config_path: str | Path | None = None) -> FormattingConfig:
-    """Loads configuration from a YAML file, or returns defaults if no path given."""
+    """Loads configuration from a YAML file or a pyproject.toml.
+
+    A ``.toml`` path is read from its [tool.sqlnbfmt] table; any other path is
+    parsed as YAML. Returns defaults if no path is given.
+    """
     if config_path is None:
         return FormattingConfig()
 
@@ -112,28 +207,15 @@ def load_config(config_path: str | Path | None = None) -> FormattingConfig:
     if not config_file.is_file():
         raise FileNotFoundError(f"Configuration file '{config_file}' not found.")
 
+    if config_file.suffix == ".toml":
+        return _config_from_dict(_read_pyproject_table(config_file) or {})
+
     try:
         with open(config_file) as file:
             config = yaml.safe_load(file)
-            if config is None:
-                return FormattingConfig()
-            return FormattingConfig(
-                sql_keywords=set(config.get("sql_keywords", DEFAULT_SQL_KEYWORDS)),
-                function_names=set(
-                    config.get("function_names", DEFAULT_FUNCTION_NAMES)
-                ),
-                sql_decorators=set(
-                    config.get("sql_decorators", DEFAULT_SQL_DECORATORS)
-                ),
-                single_line_threshold=config.get("formatting_options", {}).get(
-                    "single_line_threshold", 80
-                ),
-                indent_width=config.get("formatting_options", {}).get(
-                    "indent_width", 4
-                ),
-            )
     except yaml.YAMLError as e:
         raise yaml.YAMLError(f"Error parsing the configuration file: {e}")
+    return _config_from_dict(config or {})
 
 
 def build_line_offsets(source: str) -> list:
@@ -736,7 +818,12 @@ def main():
         help="Notebook (.ipynb) or Python (.py) file paths to process",
     )
     parser.add_argument(
-        "--config", type=Path, default=None, help="Configuration file path (optional)"
+        "--config",
+        type=Path,
+        default=None,
+        help="Configuration file path: YAML, or a pyproject.toml with a "
+        "[tool.sqlnbfmt] table (optional; by default the nearest pyproject.toml "
+        "with that table is used)",
     )
     parser.add_argument(
         "--dialect", type=str, help="SQL dialect (e.g., mysql, postgres)"
@@ -761,13 +848,21 @@ def main():
     args = parser.parse_args()
     logger = setup_logging(args.log_level)
 
+    config_path = args.config
     try:
-        config = load_config(args.config)
+        if config_path is None:
+            config_path = find_pyproject_config()
+        config = load_config(config_path)
     except FileNotFoundError as e:
         logger.error(
             f"{e}\nHint: --config is optional; omit it to use built-in defaults."
         )
         sys.exit(1)
+    except (ConfigError, yaml.YAMLError) as e:
+        location = f" in {config_path}" if config_path else ""
+        logger.error(f"Invalid configuration{location}: {e}")
+        sys.exit(1)
+    logger.debug(f"Using configuration from {config_path or 'built-in defaults'}")
 
     try:
         changed_files = []
