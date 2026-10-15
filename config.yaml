@@ -33,12 +33,14 @@ function_names:
   - read_sql_query
   - read_sql_table
   - execute
+  - executemany
   - executescript
   - fetchall
   - fetchone
   - fetchmany
   - execute_query
   - sql  # Marimo mo.sql()
+  - sqldf  # pandasql
 
 # Decorator names that contain SQL
 sql_decorators:
