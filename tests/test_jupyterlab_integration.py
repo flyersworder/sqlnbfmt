@@ -100,3 +100,30 @@ def test_register_discovers_pyproject_config(tmp_path, monkeypatch):
 
         register()
         assert mock_formatters["sqlnbfmt"]._config.indent_width == 2
+
+
+def test_register_uses_dialect_from_config(tmp_path, monkeypatch):
+    """register() falls back to the config's dialect; an explicit one wins."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "pyproject.toml").write_text('[tool.sqlnbfmt]\ndialect = "tsql"\n')
+    monkeypatch.chdir(tmp_path)
+    mock_formatters = {}
+    mock_base = type("BaseFormatter", (), {})
+
+    with patch.dict(
+        "sys.modules",
+        {
+            "jupyterlab_code_formatter": MagicMock(),
+            "jupyterlab_code_formatter.formatters": MagicMock(
+                BaseFormatter=mock_base,
+                SERVER_FORMATTERS=mock_formatters,
+            ),
+        },
+    ):
+        from sqlnbfmt.jupyterlab_integration import register
+
+        register()
+        assert mock_formatters["sqlnbfmt"]._dialect == "tsql"
+
+        register(dialect="postgres")
+        assert mock_formatters["sqlnbfmt"]._dialect == "postgres"

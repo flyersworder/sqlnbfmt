@@ -61,7 +61,8 @@ def register(
 
     Args:
         name: Key used in JupyterLab settings to reference this formatter.
-        dialect: SQL dialect (e.g. ``"postgres"``, ``"mysql"``).
+        dialect: SQL dialect (e.g. ``"postgres"``, ``"mysql"``). Defaults to
+            the ``dialect`` set in the configuration, if any.
         config_path: Path to a sqlnbfmt YAML config file or pyproject.toml.
             Defaults to the nearest pyproject.toml with a [tool.sqlnbfmt]
             table, searched from the server's working directory.
@@ -72,4 +73,4 @@ def register(
 
     config = load_config(config_path or find_pyproject_config())
     cls = _get_formatter_class()
-    SERVER_FORMATTERS[name] = cls(config=config, dialect=dialect)
+    SERVER_FORMATTERS[name] = cls(config=config, dialect=dialect or config.dialect)

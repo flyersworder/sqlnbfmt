@@ -2,6 +2,9 @@
 # Use this file only to override specific settings.
 # config.yaml
 
+# SQL dialect for sqlglot (e.g. postgres, mysql, bigquery); --dialect overrides it
+# dialect: postgres
+
 sql_keywords:
   - SELECT
   - FROM

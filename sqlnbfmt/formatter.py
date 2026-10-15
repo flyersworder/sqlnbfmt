@@ -12,6 +12,7 @@ from pathlib import Path
 import nbformat
 import yaml
 from sqlglot import errors, parse
+from sqlglot.dialects.dialect import Dialect
 
 DEFAULT_SQL_KEYWORDS = frozenset(
     {
@@ -86,6 +87,7 @@ class FormattingConfig:
     )
     single_line_threshold: int = 80
     indent_width: int = 4
+    dialect: str | None = None
 
 
 class SQLFormattingError(Exception):
@@ -124,7 +126,30 @@ def _integer(options: dict, key: str, default: int) -> int:
     return value
 
 
+def validate_dialect(dialect: str) -> str:
+    """Returns ``dialect`` unchanged if sqlglot knows it, else raises ValueError.
+
+    Without this check an unknown dialect makes every SQL string fail to parse,
+    and since per-string failures are only warnings, ``--check`` would pass.
+    """
+    Dialect.get_or_raise(dialect)
+    return dialect
+
+
+def _optional_dialect(config: dict) -> str | None:
+    value = config.get("dialect")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(f"'dialect' must be a string, got {value!r}")
+    try:
+        return validate_dialect(value)
+    except ValueError as e:
+        raise ConfigError(str(e)) from e
+
+
 _TOP_LEVEL_KEYS = {
+    "dialect",
     "sql_keywords",
     "function_names",
     "sql_decorators",
@@ -163,6 +188,7 @@ def _config_from_dict(config: dict) -> FormattingConfig:
         sql_decorators=_string_set(config, "sql_decorators", DEFAULT_SQL_DECORATORS),
         single_line_threshold=_integer(options, "single_line_threshold", 80),
         indent_width=_integer(options, "indent_width", 4),
+        dialect=_optional_dialect(config),
     )
 
 
@@ -804,6 +830,16 @@ def diff_python_file(
     )
 
 
+def _dialect_arg(value: str) -> str:
+    """argparse type for --dialect: rejects unknown dialects up front."""
+    import argparse
+
+    try:
+        return validate_dialect(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
+
+
 def main():
     """Main entry point for the SQL formatter."""
     import argparse
@@ -826,7 +862,9 @@ def main():
         "with that table is used)",
     )
     parser.add_argument(
-        "--dialect", type=str, help="SQL dialect (e.g., mysql, postgres)"
+        "--dialect",
+        type=_dialect_arg,
+        help="SQL dialect (e.g., mysql, postgres); overrides the configured dialect",
     )
     parser.add_argument(
         "--log-level",
@@ -863,6 +901,7 @@ def main():
         logger.error(f"Invalid configuration{location}: {e}")
         sys.exit(1)
     logger.debug(f"Using configuration from {config_path or 'built-in defaults'}")
+    dialect = args.dialect or config.dialect
 
     try:
         changed_files = []
@@ -872,11 +911,9 @@ def main():
 
             if args.check or args.diff:
                 if is_python:
-                    diff_output = diff_python_file(
-                        file_path, config, args.dialect, logger
-                    )
+                    diff_output = diff_python_file(file_path, config, dialect, logger)
                 else:
-                    diff_output = diff_notebook(file_path, config, args.dialect, logger)
+                    diff_output = diff_notebook(file_path, config, dialect, logger)
                 needs_formatting = bool(diff_output)
 
                 if args.diff and diff_output:
@@ -886,11 +923,9 @@ def main():
                     changed_files.append(file_path)
             else:
                 if is_python:
-                    changed = process_python_file(
-                        file_path, config, args.dialect, logger
-                    )
+                    changed = process_python_file(file_path, config, dialect, logger)
                 else:
-                    changed = process_notebook(file_path, config, args.dialect, logger)
+                    changed = process_notebook(file_path, config, dialect, logger)
                 if changed:
                     changed_files.append(file_path)
 

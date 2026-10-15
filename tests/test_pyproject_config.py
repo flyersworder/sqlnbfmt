@@ -162,3 +162,69 @@ def test_unknown_keys_warn(tmp_path, caplog):
     assert "did you mean 'formatting_options.indent_width'" in caplog.text
     assert "'function_name'" in caplog.text
     assert "'formatting_options.indent'" in caplog.text
+
+
+# T-SQL rewrites LIMIT to TOP, so the output reveals which dialect was applied.
+LIMIT_SOURCE = 'pull_rows("select id from users limit 10")\n'
+
+
+def _format_file(cwd, *extra_args):
+    result = subprocess.run(
+        ["sqlnbfmt", *extra_args, "query.py"],
+        cwd=cwd,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    return result, (cwd / "query.py").read_text()
+
+
+def test_load_config_dialect(tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[tool.sqlnbfmt]\ndialect = "postgres"\n')
+    assert load_config(pyproject).dialect == "postgres"
+
+
+def test_load_config_dialect_defaults_to_none(tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[tool.sqlnbfmt]\n")
+    assert load_config(pyproject).dialect is None
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [('"postgress"', "Did you mean postgres"), ("5", "dialect")],
+)
+def test_load_config_rejects_invalid_dialect(tmp_path, value, message):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(f"[tool.sqlnbfmt]\ndialect = {value}\n")
+    with pytest.raises(ValueError, match=message):
+        load_config(pyproject)
+
+
+def test_cli_uses_dialect_from_pyproject(repo):
+    (repo / "query.py").write_text(LIMIT_SOURCE)
+    (repo / "pyproject.toml").write_text(
+        '[tool.sqlnbfmt]\nfunction_names = ["pull_rows"]\ndialect = "tsql"\n'
+    )
+    result, formatted = _format_file(repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "TOP 10" in formatted
+
+
+def test_cli_dialect_flag_overrides_pyproject(repo):
+    (repo / "query.py").write_text(LIMIT_SOURCE)
+    (repo / "pyproject.toml").write_text(
+        '[tool.sqlnbfmt]\nfunction_names = ["pull_rows"]\ndialect = "tsql"\n'
+    )
+    result, formatted = _format_file(repo, "--dialect", "postgres")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "LIMIT 10" in formatted
+
+
+def test_cli_rejects_unknown_dialect_flag(repo):
+    """A typo'd dialect must fail loudly, not report everything as formatted."""
+    (repo / "query.py").write_text(LIMIT_SOURCE)
+    result = _run_check(repo, "--dialect", "postgress")
+    assert result.returncode == 2
+    assert "Did you mean postgres" in result.stderr

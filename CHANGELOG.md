@@ -11,12 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`pyproject.toml` configuration**: set options in a `[tool.sqlnbfmt]` table instead of a separate YAML file. Without `--config`, sqlnbfmt uses the nearest `pyproject.toml` that has the table, searching up to the repository root. The JupyterLab integration uses the same discovery ([#22](https://github.com/flyersworder/sqlnbfmt/issues/22))
 - `--config` accepts a `.toml` path as well as YAML
+- `dialect` config option (in `[tool.sqlnbfmt]` or YAML), so the dialect no longer has to be passed as `--dialect` on every run; `--dialect` still overrides it
 - **Jupyter server extension**: `pip install sqlnbfmt` now auto-registers with jupyterlab-code-formatter — no manual config needed
 
 ### Changed
 
 - Config values are now type-checked: a wrong type (e.g. a string where a list is expected) is reported as an error naming the file. Previously such values were silently mis-parsed or crashed with a traceback
 - Unknown config options now produce a warning instead of being silently ignored
+
+### Fixed
+
+- An unknown dialect (e.g. `--dialect postgress`) is now rejected with a suggestion. Previously every SQL string silently failed to parse, so `--check` reported all files as properly formatted
 - Upgraded locked dependencies, including sqlglot 29 → 30 (formatting output unchanged across the eval suite)
 - Switched build system from setuptools to hatchling
 - Updated JupyterLab docs to use `jupyter_server_config.py` (modern) instead of `jupyter_notebook_config.py` (legacy)

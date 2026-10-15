@@ -76,7 +76,7 @@ pip install sqlnbfmt jupyterlab-code-formatter
 
 That's it — sqlnbfmt auto-registers as a Jupyter server extension. In JupyterLab, use **Edit > Format Cell** or configure format-on-save in Settings > Code Formatter, and select "Apply SQL Notebook Formatter".
 
-To customize the dialect, add this to `~/.jupyter/jupyter_server_config.py`:
+The extension uses `[tool.sqlnbfmt]` (including `dialect`) from the nearest `pyproject.toml` of the directory you start Jupyter in. To set the dialect explicitly instead, add this to `~/.jupyter/jupyter_server_config.py`:
 ```python
 from sqlnbfmt.jupyterlab_integration import register
 register(dialect="postgres")
@@ -105,7 +105,7 @@ To also format Marimo notebooks (Python files), add the Python hook:
         files: '\.py$'  # optionally narrow with: files: 'marimo_.*\.py$'
 ```
 
-All arguments are optional. To specify a dialect or custom config:
+All arguments are optional. Settings in `[tool.sqlnbfmt]` in your `pyproject.toml` are picked up automatically (see [Configuration](#configuration)); alternatively pass them as arguments:
 ```yaml
         args: [--dialect, postgres, --config, config.yaml]
 ```
@@ -140,6 +140,7 @@ Use `--check` in GitHub Actions to enforce formatting:
 
 ```toml
 [tool.sqlnbfmt]
+dialect = "postgres"
 function_names = ["read_sql", "execute", "run_query"]
 
 [tool.sqlnbfmt.formatting_options]
@@ -158,6 +159,7 @@ When `--config` is given, `pyproject.toml` discovery is skipped. Options you don
 
 | Option | Description | Default |
 |--------|-------------|---------|
+| `dialect` | SQL dialect passed to sqlglot (e.g. `postgres`, `mysql`, `bigquery`); `--dialect` overrides it | none (generic SQL) |
 | `sql_keywords` | SQL keywords to recognize and format | Common SQL keywords |
 | `function_names` | Python functions containing SQL code | `read_sql`, `execute`, etc. |
 | `sql_decorators` | Decorators indicating SQL code | `query`, `sql_query`, etc. |
