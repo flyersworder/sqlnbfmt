@@ -160,12 +160,22 @@ When `--config` is given, `pyproject.toml` discovery is skipped. Options you don
 |--------|-------------|---------|
 | `dialect` | SQL dialect passed to sqlglot (e.g. `postgres`, `mysql`, `bigquery`); `--dialect` overrides it | none (generic SQL) |
 | `sql_keywords` | SQL keywords to recognize and format | Common SQL keywords |
-| `function_names` | Python functions containing SQL code | `read_sql`, `execute`, `sql` (Marimo's `mo.sql`), etc. |
+| `function_names` | Python functions containing SQL code (see [matching](#how-function-names-match)) | `read_sql`, `execute`, `sql` (Marimo's `mo.sql`), etc. |
 | `sql_decorators` | Decorators indicating SQL code | `query`, `sql_query`, etc. |
 | `formatting_options.single_line_threshold` | Maximum length before splitting SQL | 80 |
 | `formatting_options.indent_width` | Number of spaces for indentation | 4 |
 
 `sql_keywords`, `function_names` and `sql_decorators` **replace** the built-in lists rather than extending them. Copy the defaults you still rely on from the [template](https://github.com/flyersworder/sqlnbfmt/blob/main/config.yaml); for example, keep `sql` in `function_names` or Marimo's `mo.sql()` calls stop being formatted.
+
+### How function names match
+
+A call counts as SQL-bearing when a configured name appears **anywhere** in its full dotted name. Matching is case-sensitive. This is deliberately permissive, so that wrappers and variants are covered without configuration:
+
+- `execute` matches `cursor.execute`, `cursor.executemany` and `execute_sql`
+- `sql` matches `mo.sql`, `spark.sql`, pandasql's `sqldf`/`pysqldf` and `sqlalchemy.text`
+- `sql` does **not** match `runSQLQuery`, because matching is case-sensitive; add `SQL` if you need it
+
+A matched call's string arguments are only reformatted if they look like SQL. Still, prefer specific names: `run` would also match `rerun(...)` and `subprocess.run(...)`, so use `run_query` rather than `run`.
 
 ## Examples
 
