@@ -141,7 +141,6 @@ Use `--check` in GitHub Actions to enforce formatting:
 ```toml
 [tool.sqlnbfmt]
 dialect = "postgres"
-function_names = ["read_sql", "execute", "run_query"]
 
 [tool.sqlnbfmt.formatting_options]
 indent_width = 2
@@ -161,10 +160,12 @@ When `--config` is given, `pyproject.toml` discovery is skipped. Options you don
 |--------|-------------|---------|
 | `dialect` | SQL dialect passed to sqlglot (e.g. `postgres`, `mysql`, `bigquery`); `--dialect` overrides it | none (generic SQL) |
 | `sql_keywords` | SQL keywords to recognize and format | Common SQL keywords |
-| `function_names` | Python functions containing SQL code | `read_sql`, `execute`, etc. |
+| `function_names` | Python functions containing SQL code | `read_sql`, `execute`, `sql` (Marimo's `mo.sql`), etc. |
 | `sql_decorators` | Decorators indicating SQL code | `query`, `sql_query`, etc. |
 | `formatting_options.single_line_threshold` | Maximum length before splitting SQL | 80 |
 | `formatting_options.indent_width` | Number of spaces for indentation | 4 |
+
+`sql_keywords`, `function_names` and `sql_decorators` **replace** the built-in lists rather than extending them. Copy the defaults you still rely on from the [template](https://github.com/flyersworder/sqlnbfmt/blob/main/config.yaml); for example, keep `sql` in `function_names` or Marimo's `mo.sql()` calls stop being formatted.
 
 ## Examples
 

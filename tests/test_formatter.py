@@ -517,3 +517,17 @@ def test_format_cell_source_skip_hint(logger):
     code = '# sqlnbfmt: skip\nquery = "select * from users"'
     result = format_cell_source(code, config, "mysql", logger)
     assert result == code
+
+
+def test_config_template_matches_defaults():
+    """The documented config.yaml template mirrors the built-in defaults.
+
+    Lists in a config replace the defaults, so a stale template silently drops
+    names (e.g. `sql`, which Marimo's mo.sql() relies on) for users who copy it.
+    """
+    from pathlib import Path
+
+    from sqlnbfmt.formatter import FormattingConfig
+
+    template = Path(__file__).parent.parent / "config.yaml"
+    assert load_config(template) == FormattingConfig()

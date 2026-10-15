@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - An unknown dialect (e.g. `--dialect postgress`) is now rejected with a suggestion. Previously every SQL string silently failed to parse, so `--check` reported all files as properly formatted
+- The `config.yaml` template was missing the `sql` function name (default since 0.4.0). Because config lists replace the defaults, copying the template silently disabled Marimo `mo.sql()` formatting. The README now states the replace semantics explicitly
 - Upgraded locked dependencies, including sqlglot 29 → 30 (formatting output unchanged across the eval suite)
 - Switched build system from setuptools to hatchling
 - Updated JupyterLab docs to use `jupyter_server_config.py` (modern) instead of `jupyter_notebook_config.py` (legacy)

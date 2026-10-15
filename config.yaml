@@ -38,6 +38,7 @@ function_names:
   - fetchone
   - fetchmany
   - execute_query
+  - sql  # Marimo mo.sql()
 
 # Decorator names that contain SQL
 sql_decorators:
