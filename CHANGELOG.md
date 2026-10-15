@@ -12,7 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`pyproject.toml` configuration**: set options in a `[tool.sqlnbfmt]` table instead of a separate YAML file. Without `--config`, sqlnbfmt uses the nearest `pyproject.toml` that has the table, searching up to the repository root. The JupyterLab integration uses the same discovery ([#22](https://github.com/flyersworder/sqlnbfmt/issues/22))
 - `--config` accepts a `.toml` path as well as YAML
 - `dialect` config option (in `[tool.sqlnbfmt]` or YAML), so the dialect no longer has to be passed as `--dialect` on every run; `--dialect` still overrides it
-- **Jupyter server extension**: `pip install sqlnbfmt` now auto-registers with jupyterlab-code-formatter — no manual config needed
 
 ### Changed
 
@@ -26,9 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An unknown dialect (e.g. `--dialect postgress`) is now rejected with a suggestion. Previously every SQL string silently failed to parse, so `--check` reported all files as properly formatted
 - The `config.yaml` template was missing the `sql` function name (default since 0.4.0). Because config lists replace the defaults, copying the template silently disabled Marimo `mo.sql()` formatting. The README now states the replace semantics explicitly
 - Upgraded locked dependencies, including sqlglot 29 → 30 (formatting output unchanged across the eval suite)
+- A skipped Jupyter extension registration is now logged at debug level instead of being silently swallowed
+
+## [0.4.2] - 2026-03-24
+
+### Added
+
+- **Jupyter server extension**: `pip install sqlnbfmt` now auto-registers with jupyterlab-code-formatter — no manual config needed
+
+### Changed
+
 - Switched build system from setuptools to hatchling
 - Updated JupyterLab docs to use `jupyter_server_config.py` (modern) instead of `jupyter_notebook_config.py` (legacy)
-- A skipped Jupyter extension registration is now logged at debug level instead of being silently swallowed
 
 ## [0.4.0] - 2026-03-24
 
