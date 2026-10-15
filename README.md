@@ -93,7 +93,7 @@ pip install pre-commit
 ```yaml
 repos:
   - repo: https://github.com/flyersworder/sqlnbfmt
-    rev: v0.4.0
+    rev: v0.5.0
     hooks:
       - id: sqlnbfmt
         types: [jupyter]

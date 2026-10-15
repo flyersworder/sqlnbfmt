@@ -5,16 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.2] - Unreleased
+## [0.5.0] - Unreleased
 
 ### Added
 
+- **`pyproject.toml` configuration**: set options in a `[tool.sqlnbfmt]` table instead of a separate YAML file. Without `--config`, sqlnbfmt uses the nearest `pyproject.toml` that has the table, searching up to the repository root. The JupyterLab integration uses the same discovery ([#22](https://github.com/flyersworder/sqlnbfmt/issues/22))
+- `--config` accepts a `.toml` path as well as YAML
 - **Jupyter server extension**: `pip install sqlnbfmt` now auto-registers with jupyterlab-code-formatter — no manual config needed
 
 ### Changed
 
+- Config values are now type-checked: a wrong type (e.g. a string where a list is expected) is reported as an error naming the file. Previously such values were silently mis-parsed or crashed with a traceback
+- Unknown config options now produce a warning instead of being silently ignored
+- Upgraded locked dependencies, including sqlglot 29 → 30 (formatting output unchanged across the eval suite)
 - Switched build system from setuptools to hatchling
 - Updated JupyterLab docs to use `jupyter_server_config.py` (modern) instead of `jupyter_notebook_config.py` (legacy)
+- A skipped Jupyter extension registration is now logged at debug level instead of being silently swallowed
 
 ## [0.4.0] - 2026-03-24
 
