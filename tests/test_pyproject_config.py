@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import subprocess
 import tomllib
@@ -9,6 +10,7 @@ from sqlnbfmt.formatter import (
     DEFAULT_FUNCTION_NAMES,
     DEFAULT_SQL_DECORATORS,
     DEFAULT_SQL_KEYWORDS,
+    _format_python_source,
     find_pyproject_config,
     load_config,
 )
@@ -306,25 +308,37 @@ def test_extend_rejects_wrong_type(tmp_path, config_format):
 
 
 def test_extend_keys_are_not_reported_as_unknown(tmp_path, caplog):
-    path = _write_config(tmp_path, "toml", {"extend_function_names": ["run_query"]})
+    caplog.set_level(logging.WARNING, logger="formatter")
+    path = _write_config(
+        tmp_path, "toml", {"extend_function_names": ["run_query"], "bogus": ["x"]}
+    )
     load_config(path)
-    assert "unknown" not in caplog.text
+    assert "'bogus'" in caplog.text  # warnings are captured...
+    assert "extend_function_names" not in caplog.text  # ...but not for extend_*
 
 
-def test_kebab_case_key_suggests_snake_case(tmp_path, caplog):
+@pytest.mark.parametrize(
+    ("toml", "suggestion"),
+    [
+        ('extend-function-names = ["run_query"]', "extend_function_names"),
+        ("indent-width = 2", "formatting_options.indent_width"),
+        (
+            "[tool.sqlnbfmt.formatting_options]\nindent-width = 2",
+            "formatting_options.indent_width",
+        ),
+    ],
+)
+def test_kebab_case_key_suggests_snake_case(tmp_path, caplog, toml, suggestion):
+    caplog.set_level(logging.WARNING, logger="formatter")
     pyproject = tmp_path / "pyproject.toml"
-    pyproject.write_text('[tool.sqlnbfmt]\nextend-function-names = ["run_query"]\n')
+    pyproject.write_text(f"[tool.sqlnbfmt]\n{toml}\n")
     config = load_config(pyproject)
-    assert "run_query" not in config.function_names
-    assert "did you mean 'extend_function_names'" in caplog.text
+    assert config.indent_width == 4 and "run_query" not in config.function_names
+    assert f"did you mean '{suggestion}'" in caplog.text
 
 
 def test_extend_keeps_marimo_formatting(tmp_path):
     """The point of #26: adding a function doesn't drop `sql` (mo.sql)."""
-    import logging
-
-    from sqlnbfmt.formatter import _format_python_source
-
     path = _write_config(tmp_path, "toml", {"extend_function_names": ["pull_rows"]})
     source = (
         'def _(mo):\n    _df = mo.sql(f"select id from users limit 5")\n'
@@ -334,3 +348,21 @@ def test_extend_keeps_marimo_formatting(tmp_path):
         source, load_config(path), None, logging.getLogger("test")
     )
     assert formatted.count("LIMIT 5") == 2
+
+
+@pytest.mark.parametrize("key", ["sql_keywords", "extend_sql_keywords"])
+def test_sql_keywords_are_case_insensitive(tmp_path, config_format, key):
+    """Detection compares against upper-cased code, so keywords are stored upper-case."""
+    path = _write_config(tmp_path, config_format, {key: ["merge", "Using"]})
+    config = load_config(path)
+    assert {"MERGE", "USING"} <= config.sql_keywords
+    assert "merge" not in config.sql_keywords
+
+
+@pytest.mark.parametrize("key", ["function_names", "extend_function_names"])
+@pytest.mark.parametrize("value", ["", "  "])
+def test_lists_reject_blank_entries(tmp_path, key, value):
+    """A blank function name would match every call (names match as substrings)."""
+    path = _write_config(tmp_path, "toml", {key: ["read_sql", value]})
+    with pytest.raises(ValueError, match=key):
+        load_config(path)
