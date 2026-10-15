@@ -257,6 +257,11 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pytest
 ```
 
+   Before a release, also run the live end-to-end tests. They build the wheel, install it into a fresh virtualenv with Jupyter Server and jupyterlab-code-formatter, and exercise the CLI, the pre-commit hooks and the Jupyter extension against a scratch project. They need `uv`, `git` and network access, so the default `pytest` run skips them:
+```bash
+uv run pytest -m live
+```
+
 4. Add eval cases: see `tests/eval/generate_fixtures.py` for examples. Run `python tests/eval/generate_fixtures.py` to regenerate fixtures.
 
 5. Install dev pre-commit hooks:
