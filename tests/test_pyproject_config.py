@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tomllib
 
@@ -46,12 +47,25 @@ def test_load_config_from_pyproject(tmp_path):
     assert config.single_line_threshold == 80
 
 
-def test_load_config_pyproject_without_tool_table(tmp_path):
-    pyproject = tmp_path / "pyproject.toml"
-    pyproject.write_text(PYPROJECT_WITHOUT_TOOL)
-    config = load_config(pyproject)
-    assert "read_sql" in config.function_names
-    assert config.indent_width == 4
+def test_load_config_explicit_toml_without_tool_table(tmp_path):
+    """An explicitly passed .toml without [tool.sqlnbfmt] is a mistake, not defaults."""
+    pyproject = tmp_path / "sqlnbfmt.toml"
+    pyproject.write_text('dialect = "postgres"\n')
+    with pytest.raises(ValueError, match=r"no \[tool\.sqlnbfmt\] table"):
+        load_config(pyproject)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read any file")
+@pytest.mark.parametrize("name", ["pyproject.toml", "config.yaml"])
+def test_load_config_unreadable_file(tmp_path, name):
+    config_file = tmp_path / name
+    config_file.write_text("[tool.sqlnbfmt]\n")
+    config_file.chmod(0)
+    try:
+        with pytest.raises(ValueError, match="Could not read"):
+            load_config(config_file)
+    finally:
+        config_file.chmod(0o644)
 
 
 def test_load_config_malformed_pyproject(tmp_path):

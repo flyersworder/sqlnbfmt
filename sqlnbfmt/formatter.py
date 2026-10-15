@@ -197,6 +197,8 @@ def _read_pyproject_table(pyproject: Path) -> dict | None:
     try:
         with open(pyproject, "rb") as file:
             data = tomllib.load(file)
+    except OSError as e:
+        raise ConfigError(f"Could not read {pyproject}: {e}") from e
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"Could not parse {pyproject}: {e}") from e
     return data.get("tool", {}).get("sqlnbfmt")
@@ -234,11 +236,16 @@ def load_config(config_path: str | Path | None = None) -> FormattingConfig:
         raise FileNotFoundError(f"Configuration file '{config_file}' not found.")
 
     if config_file.suffix == ".toml":
-        return _config_from_dict(_read_pyproject_table(config_file) or {})
+        table = _read_pyproject_table(config_file)
+        if table is None:
+            raise ConfigError(f"{config_file} has no [tool.sqlnbfmt] table")
+        return _config_from_dict(table)
 
     try:
         with open(config_file) as file:
             config = yaml.safe_load(file)
+    except OSError as e:
+        raise ConfigError(f"Could not read {config_file}: {e}") from e
     except yaml.YAMLError as e:
         raise yaml.YAMLError(f"Error parsing the configuration file: {e}")
     return _config_from_dict(config or {})

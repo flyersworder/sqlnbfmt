@@ -21,7 +21,12 @@ def _get_formatter_class():
     """Build the formatter class lazily to avoid hard dependency."""
     from jupyterlab_code_formatter.formatters import BaseFormatter
 
-    from sqlnbfmt.formatter import FormattingConfig, format_cell_source, load_config
+    from sqlnbfmt.formatter import (
+        FormattingConfig,
+        format_cell_source,
+        load_config,
+        validate_dialect,
+    )
 
     class SQLNotebookFormatter(BaseFormatter):
         label = "Apply SQL Notebook Formatter"
@@ -40,7 +45,11 @@ def _get_formatter_class():
             return True
 
         def format_code(self, code: str, notebook: bool, **options) -> str:
-            dialect = options.pop("dialect", self._dialect)
+            dialect = options.pop("dialect", None)
+            if dialect:
+                validate_dialect(dialect)
+            else:
+                dialect = self._dialect
             return format_cell_source(code, self._config, dialect, self._logger)
 
     return SQLNotebookFormatter
@@ -69,8 +78,14 @@ def register(
     """
     from jupyterlab_code_formatter.formatters import SERVER_FORMATTERS
 
-    from sqlnbfmt.formatter import find_pyproject_config, load_config
+    from sqlnbfmt.formatter import (
+        find_pyproject_config,
+        load_config,
+        validate_dialect,
+    )
 
     config = load_config(config_path or find_pyproject_config())
+    if dialect:
+        validate_dialect(dialect)
     cls = _get_formatter_class()
     SERVER_FORMATTERS[name] = cls(config=config, dialect=dialect or config.dialect)
