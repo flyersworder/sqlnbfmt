@@ -5,17 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Changed
-
-- **Function names now match whole words instead of substrings** ([#28](https://github.com/flyersworder/sqlnbfmt/issues/28)). A configured name matches a call when its words appear in the last part of the call's name; words are split at `_` and camelCase boundaries, and matching ignores case. `execute` still matches `cursor.execute`, `execute_sql` and `executeQuery`, but a name like `run` no longer matches `rerun`, and the module path no longer counts (`sql` no longer matches `pyspark.sql.functions.expr`). Previously, short names caused string arguments of unrelated calls to be reformatted
-- `executemany` and `sqldf` (pandasql) are added to the default function names. Substring matching used to cover them by accident, through `execute` and `sql`
-
-### Added
-
-- Dotted function names match the end of the call path, for targeting one call precisely: `db.run` matches `db.run(...)` but not `subprocess.run(...)`
-
 ## [0.5.0] - 2026-10-15
 
 ### Added

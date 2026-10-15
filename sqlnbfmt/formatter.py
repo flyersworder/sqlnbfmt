@@ -46,14 +46,12 @@ DEFAULT_FUNCTION_NAMES = frozenset(
         "read_sql_query",
         "read_sql_table",
         "execute",
-        "executemany",
         "executescript",
         "fetchall",
         "fetchone",
         "fetchmany",
         "execute_query",
         "sql",
-        "sqldf",
     }
 )
 
@@ -65,32 +63,6 @@ DEFAULT_SQL_DECORATORS = frozenset(
         "db_query",
     }
 )
-
-
-def _name_words(name: str) -> list[str]:
-    """Lower-cased words of an identifier, split at ``_`` and camelCase boundaries."""
-    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name)
-    return [word.lower() for word in spaced.split("_") if word]
-
-
-def matches_function_name(call_name: str, name: str) -> bool:
-    """Whether a call (dotted name, e.g. ``pd.read_sql``) matches a configured name.
-
-    A plain name matches whole words of the call's last component, so ``execute``
-    matches ``cursor.execute``, ``execute_sql`` and ``executeQuery`` but ``run``
-    doesn't match ``rerun``. A dotted name matches the end of the call path, so
-    ``mo.sql`` matches ``mo.sql`` and ``app.mo.sql`` but not ``memo.sql``.
-    """
-    if "." in name:
-        return call_name == name or call_name.endswith("." + name)
-    target = _name_words(name)
-    if not target:
-        return False
-    words = _name_words(call_name.rpartition(".")[2])
-    return any(
-        words[i : i + len(target)] == target
-        for i in range(len(words) - len(target) + 1)
-    )
 
 
 @dataclass
@@ -557,10 +529,7 @@ class SQLStringFormatter(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         """Handles function calls."""
         func_name = self.get_full_func_name(node.func)
-        if any(
-            matches_function_name(func_name, name)
-            for name in self.config.function_names
-        ):
+        if any(name in func_name for name in self.config.function_names):
             values = [*node.args, *(keyword.value for keyword in node.keywords)]
             for value in values:
                 if isinstance(value, (ast.Constant, ast.JoinedStr)):
