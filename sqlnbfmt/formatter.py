@@ -73,6 +73,9 @@ class SQLReplacement:
     start_offset: int
     end_offset: int
     new_text: str
+    # The string literal being replaced and the template it must evaluate to
+    node: ast.AST | None = None
+    intended: tuple | None = None
 
 
 @dataclass
@@ -291,11 +294,24 @@ def build_line_offsets(source: str) -> list:
     return offsets
 
 
-def node_offsets(node: ast.AST, line_offsets: list) -> tuple[int, int]:
+def _char_column(source: str, line_start: int, byte_column: int) -> int:
+    """Converts an AST column (UTF-8 bytes) to a character column."""
+    # A line's first n characters encode to at least n bytes, so this slice
+    # covers the byte column; the column always falls on a character boundary.
+    prefix = source[line_start : line_start + byte_column]
+    if prefix.isascii():
+        return byte_column
+    return len(prefix.encode("utf-8")[:byte_column].decode("utf-8"))
+
+
+def node_offsets(node: ast.AST, line_offsets: list, source: str) -> tuple[int, int]:
     """Converts AST node line/col positions to (start, end) character offsets."""
-    start = line_offsets[node.lineno - 1] + node.col_offset
-    end = line_offsets[node.end_lineno - 1] + node.end_col_offset
-    return start, end
+    start_line = line_offsets[node.lineno - 1]
+    end_line = line_offsets[node.end_lineno - 1]
+    return (
+        start_line + _char_column(source, start_line, node.col_offset),
+        end_line + _char_column(source, end_line, node.end_col_offset),
+    )
 
 
 def format_sql_code(
@@ -330,23 +346,17 @@ def format_sql_code(
 
         temp_sql = sql_code
 
-        # Handle placeholders in f-strings
-        placeholder_mapping = {}
-        if placeholders:
-            for placeholder in placeholders:
-                # Replace placeholder with a valid SQL parameter
-                temp_placeholder = f":{placeholder}"
-                temp_sql = temp_sql.replace(placeholder, temp_placeholder)
-                placeholder_mapping[temp_placeholder] = placeholder
-
-        # Handle automatic placeholders (%s, ?)
-        auto_placeholder_pattern = re.compile(r"%s|\?")
-        auto_placeholders = auto_placeholder_pattern.findall(temp_sql)
+        # Stand-ins for f-string fields ({...}, already PLACEHOLDER_n_ tokens) and
+        # DB-API parameters (%s, ?) are plain identifiers: every dialect prints
+        # those unchanged, whereas named parameters (:name) are rewritten per
+        # dialect (%(name)s, $name, @name). Trailing "_" keeps _1_ from being a
+        # prefix of _10_.
         auto_placeholder_mapping = {}
-        for idx, ph in enumerate(auto_placeholders):
-            temp_placeholder = f":AUTO_PLACEHOLDER_{idx}"
-            temp_sql = temp_sql.replace(ph, temp_placeholder, 1)
-            auto_placeholder_mapping[temp_placeholder] = ph
+        for idx, match in enumerate(re.findall(r"%s|\?", temp_sql)):
+            temp_placeholder = f"AUTO_PLACEHOLDER_{idx}_"
+            temp_sql = temp_sql.replace(match, temp_placeholder, 1)
+            auto_placeholder_mapping[temp_placeholder] = match
+        stand_ins = [*(placeholders or {}), *auto_placeholder_mapping]
 
         temp_sql = temp_sql.strip()
 
@@ -373,22 +383,14 @@ def format_sql_code(
         else:
             formatted_sql = formatted_sql.strip()
 
-        # Restore placeholders in f-strings
-        if placeholders:
-            for temp_placeholder, original_placeholder in placeholder_mapping.items():
-                # Remove quotes around placeholders if any
-                formatted_sql = formatted_sql.replace(
-                    f"'{temp_placeholder}'", temp_placeholder
-                )
-                formatted_sql = formatted_sql.replace(
-                    f'"{temp_placeholder}"', temp_placeholder
-                )
-                # Replace temp placeholders with original placeholders
-                formatted_sql = formatted_sql.replace(
-                    temp_placeholder, original_placeholder
+        # Every stand-in must come back exactly as often as it went in
+        for token in stand_ins:
+            if formatted_sql.count(token) != temp_sql.count(token):
+                raise SQLFormattingError(
+                    f"placeholder {token} was altered by formatting; skipped"
                 )
 
-        # Restore automatic placeholders
+        # Restore DB-API parameters; f-string tokens are restored by the caller
         for temp_placeholder, original_placeholder in auto_placeholder_mapping.items():
             formatted_sql = formatted_sql.replace(
                 temp_placeholder, original_placeholder
@@ -404,6 +406,101 @@ def format_sql_code(
         raise SQLFormattingError(f"Failed to parse SQL code: {e}")
     except Exception as e:  # noqa: BLE001 - sqlglot raises many types; normalize them
         raise SQLFormattingError(f"Unexpected error during SQL formatting: {e}")
+
+
+_STRING_PREFIX = re.compile(r"[A-Za-z]*")
+_PLACEHOLDER_TOKEN = re.compile(r"(PLACEHOLDER_\d+_)")
+
+
+def _placeholder_source(value: ast.FormattedValue) -> str:
+    """Source of one ``{...}`` replacement field, with conversion and format spec."""
+    unparsed = ast.unparse(ast.JoinedStr(values=[value]))[1:]  # drop the "f"
+    quote = unparsed[:3] if unparsed[:3] in ('"""', "'''") else unparsed[0]
+    return unparsed[len(quote) : -len(quote)]
+
+
+def _normalize_template(parts: list[tuple[str, str]]) -> tuple:
+    merged: list[tuple[str, str]] = []
+    for kind, content in parts:
+        if kind == "text" and not content:
+            continue
+        if kind == "text" and merged and merged[-1][0] == "text":
+            merged[-1] = ("text", merged[-1][1] + content)
+        else:
+            merged.append((kind, content))
+    return ("fstring", tuple(merged))
+
+
+def literal_template(node: ast.AST) -> tuple | None:
+    """What a string literal evaluates to: its value, or for an f-string its text
+    and replacement fields. Used to check that rewrites keep the meaning."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return ("str", node.value)
+    if isinstance(node, ast.JoinedStr):
+        return _normalize_template(
+            [
+                ("text", part.value)
+                if isinstance(part, ast.Constant)
+                else ("expr", ast.dump(part))
+                for part in node.values
+            ]
+        )
+    return None
+
+
+def _string_literals(tree: ast.AST) -> list[ast.AST]:
+    """Top-level string literals (not the parts inside f-strings), in source order."""
+    found = []
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if literal_template(node) is not None:
+            found.append(node)
+        else:
+            stack.extend(ast.iter_child_nodes(node))
+    return sorted(found, key=lambda n: (n.lineno, n.col_offset))
+
+
+def _apply_replacements(
+    source: str,
+    tree: ast.AST,
+    replacements: list[SQLReplacement],
+    logger: logging.Logger,
+) -> str:
+    """Applies replacements, or returns ``source`` if the result isn't faithful.
+
+    Safety net: the edited source must parse, have the same string literals in
+    the same order, every untouched literal unchanged and every rewritten one
+    equal to its intended template.
+    """
+    result = source
+    for rep in sorted(replacements, key=lambda r: r.start_offset, reverse=True):
+        result = result[: rep.start_offset] + rep.new_text + result[rep.end_offset :]
+
+    intended = {id(rep.node): rep.intended for rep in replacements}
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            new_tree = ast.parse(result)
+    except SyntaxError:
+        new_tree = None
+    old_literals = _string_literals(tree)
+    new_literals = _string_literals(new_tree) if new_tree else []
+    if (
+        new_tree is None
+        or len(old_literals) != len(new_literals)
+        or any(
+            literal_template(new) != intended.get(id(old), literal_template(old))
+            for old, new in zip(old_literals, new_literals)
+        )
+    ):
+        logger.warning(
+            "SQL formatting would have changed the code's meaning, so it was left "
+            "unchanged. Please report this at "
+            "https://github.com/flyersworder/sqlnbfmt/issues"
+        )
+        return source
+    return result
 
 
 class SQLStringFormatter(ast.NodeVisitor):
@@ -451,26 +548,21 @@ class SQLStringFormatter(ast.NodeVisitor):
 
         return keyword_count >= 2 or has_sql_pattern
 
-    def extract_fstring_parts(self, node: ast.JoinedStr) -> tuple[str, dict[str, str]]:
-        """Extracts parts of an f-string, preserving expressions."""
+    @staticmethod
+    def extract_fstring_parts(
+        node: ast.JoinedStr,
+    ) -> tuple[str, dict[str, ast.FormattedValue]]:
+        """The f-string's SQL with a token for each ``{...}``, and token -> node."""
         sql_parts = []
         placeholders = {}
-        placeholder_counter = 0
-
-        # Handle empty f-strings or f-strings with only constants
-        if all(isinstance(value, ast.Constant) for value in node.values):
-            return "".join(value.value for value in node.values), {}
-
         for value in node.values:
             if isinstance(value, ast.Constant):
                 sql_parts.append(value.value)
             elif isinstance(value, ast.FormattedValue):
-                expr = ast.unparse(value.value)
-                placeholder = f"PLACEHOLDER_{placeholder_counter}"
+                # Trailing "_" so _1_ is not a prefix of _10_
+                placeholder = f"PLACEHOLDER_{len(placeholders)}_"
                 sql_parts.append(placeholder)
-                placeholders[placeholder] = expr
-                placeholder_counter += 1
-
+                placeholders[placeholder] = value
         return "".join(sql_parts), placeholders
 
     def format_sql_node(
@@ -499,7 +591,7 @@ class SQLStringFormatter(ast.NodeVisitor):
                     sql_str,
                     self.dialect,
                     self.config,
-                    placeholders=placeholders if placeholders else None,
+                    placeholders=placeholders or None,
                     force_single_line=force_single_line,
                 )
             except SQLFormattingError:
@@ -508,21 +600,13 @@ class SQLStringFormatter(ast.NodeVisitor):
             if formatted_sql == textwrap.dedent(sql_str).strip():
                 return None
 
-            # Restore placeholders as f-string expressions
-            if placeholders:
-                for ph in placeholders:
-                    formatted_sql = formatted_sql.replace(f"'{ph}'", ph)
-                    formatted_sql = formatted_sql.replace(f'"{ph}"', ph)
-                for ph, expr in placeholders.items():
-                    formatted_sql = formatted_sql.replace(ph, f"{{{expr}}}")
-
             replacement = self._build_replacement_text(
-                formatted_sql, node, block_indent
+                formatted_sql, node, block_indent, placeholders
             )
             if replacement is None:
-                self.logger.debug(
-                    "SQL formatting skipped: the result can't be written back as "
-                    "an equivalent string literal"
+                self.logger.warning(
+                    f"line {node.lineno}: SQL formatting skipped: the formatted SQL "
+                    "can't be written back as an equivalent string literal"
                 )
                 return None
             self.changed = True
@@ -540,8 +624,9 @@ class SQLStringFormatter(ast.NodeVisitor):
         formatted_sql: str,
         node: ast.Constant | ast.JoinedStr,
         block_indent: str | None,
-    ) -> str | None:
-        """Constructs the replacement string literal, or None if it can't be safe.
+        placeholders: dict[str, ast.FormattedValue],
+    ) -> tuple[str, tuple] | None:
+        """Constructs the replacement literal and its template, or None if unsafe.
 
         With ``block_indent`` (SQL passed to a call), the SQL lines and closing
         quotes are indented by it; where the block starts and what follows it is
@@ -552,73 +637,80 @@ class SQLStringFormatter(ast.NodeVisitor):
             indented_sql = "\n".join(
                 block_indent + line if line.strip() else line for line in lines
             )
-            return self._to_literal(f"\n{indented_sql}\n{block_indent}", node)
+            return self._to_literal(
+                f"\n{indented_sql}\n{block_indent}", node, placeholders
+            )
         if "\n" in formatted_sql:
-            return self._to_literal(f"\n{formatted_sql}\n", node)
-        return self._to_literal(formatted_sql, node)
+            return self._to_literal(f"\n{formatted_sql}\n", node, placeholders)
+        return self._to_literal(formatted_sql, node, placeholders)
 
-    def _to_literal(self, value: str, node: ast.Constant | ast.JoinedStr) -> str | None:
-        """Writes ``value`` as a Python literal replacing ``node``, or returns None.
+    def _to_literal(
+        self,
+        text: str,
+        node: ast.Constant | ast.JoinedStr,
+        placeholders: dict[str, ast.FormattedValue],
+    ) -> tuple[str, tuple] | None:
+        """Writes ``text`` as a literal replacing ``node``: (literal, template).
 
-        Keeps the original raw (``r``) prefix, escapes backslashes otherwise, and
-        picks quotes that don't clash with the SQL. The result is parsed back and
-        must evaluate to ``value`` (for f-strings: keep the same placeholders);
-        a string that can't be written back faithfully is left alone.
+        ``text`` is the intended value, with f-string placeholder tokens in place
+        of ``{...}``. Keeps the original raw (``r``) prefix, escapes backslashes
+        otherwise, doubles literal braces in f-strings, and picks quotes that
+        don't clash. The literal is parsed back and must match the intended
+        template (see ``literal_template``); otherwise None.
         """
-        start, _ = node_offsets(node, self.line_offsets)
-        original_prefix = re.match(r"[A-Za-z]*", self.source[start:]).group()
-        raw = "r" in original_prefix.lower()
+        start = self._offsets(node)[0]
+        raw = "r" in _STRING_PREFIX.match(self.source, start).group().lower()
         is_fstring = isinstance(node, ast.JoinedStr)
         prefix = ("r" if raw else "") + ("f" if is_fstring else "")
-        if raw:
-            body = value
-        elif is_fstring and "\\" in value:
-            return None  # escaping could also touch the {expressions}
-        else:
-            body = value.replace("\\", "\\\\")
+
+        def escape(part: str) -> str:
+            if not raw:
+                part = part.replace("\\", "\\\\")
+            if is_fstring:
+                part = part.replace("{", "{{").replace("}", "}}")
+            return part
+
+        body_parts, template_parts = [], []
+        for piece in _PLACEHOLDER_TOKEN.split(text) if is_fstring else [text]:
+            if piece in placeholders:
+                body_parts.append(_placeholder_source(placeholders[piece]))
+                template_parts.append(("expr", ast.dump(placeholders[piece])))
+            else:
+                body_parts.append(escape(piece))
+                template_parts.append(("text", piece))
+        body = "".join(body_parts)
+        intended = _normalize_template(template_parts) if is_fstring else ("str", text)
+        if raw and body.endswith("\\"):
+            return None
 
         quotes = ('"""', "'''") if "\n" in body else ('"', "'", '"""', "'''")
         for quote in quotes:
-            if (
-                quote in body
-                or body.endswith(quote[0])
-                or (raw and body.endswith("\\"))
-            ):
+            if quote in body or body.endswith(quote[0]):
                 continue
             literal = f"{prefix}{quote}{body}{quote}"
-            if self._literal_is_faithful(literal, value, node):
-                return literal
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")  # e.g. invalid escape sequences
+                    parsed = ast.parse(literal, mode="eval").body
+            except (SyntaxError, SyntaxWarning):
+                continue
+            if literal_template(parsed) == intended:
+                return literal, intended
         return None
 
-    @staticmethod
-    def _literal_is_faithful(
-        literal: str, value: str, node: ast.Constant | ast.JoinedStr
-    ) -> bool:
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("error")  # e.g. invalid escape sequences
-                parsed = ast.parse(literal, mode="eval").body
-        except (SyntaxError, SyntaxWarning):
-            return False
-        if isinstance(node, ast.JoinedStr):
-
-            def placeholders(fstring: ast.AST) -> list[str]:
-                return [
-                    ast.dump(part)
-                    for part in getattr(fstring, "values", [])
-                    if isinstance(part, ast.FormattedValue)
-                ]
-
-            return placeholders(parsed) == placeholders(node)
-        return isinstance(parsed, ast.Constant) and parsed.value == value
+    def _offsets(self, node: ast.AST) -> tuple[int, int]:
+        return node_offsets(node, self.line_offsets, self.source)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         """Handles assignments."""
         if isinstance(node.value, (ast.Constant, ast.JoinedStr)):
-            replacement_text = self.format_sql_node(node.value)
-            if replacement_text:
-                start, end = node_offsets(node.value, self.line_offsets)
-                self.replacements.append(SQLReplacement(start, end, replacement_text))
+            replacement = self.format_sql_node(node.value)
+            if replacement:
+                literal, intended = replacement
+                start, end = self._offsets(node.value)
+                self.replacements.append(
+                    SQLReplacement(start, end, literal, node.value, intended)
+                )
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -643,12 +735,13 @@ class SQLStringFormatter(ast.NodeVisitor):
         replacement = self.format_sql_node(arg, block_indent=block_indent)
         if not replacement:
             return
-        start, end = node_offsets(arg, self.line_offsets)
-        if "\n" in replacement:
-            start, end, replacement = self._layout_call_argument(
-                start, end, replacement, base_indent, block_indent
+        literal, intended = replacement
+        start, end = self._offsets(arg)
+        if "\n" in literal:
+            start, end, literal = self._layout_call_argument(
+                start, end, literal, base_indent, block_indent
             )
-        self.replacements.append(SQLReplacement(start, end, replacement))
+        self.replacements.append(SQLReplacement(start, end, literal, arg, intended))
 
     def _layout_call_argument(
         self,
@@ -796,15 +889,7 @@ def format_cell_source(
     if not formatter.replacements:
         return code
 
-    result = code
-    for rep in sorted(
-        formatter.replacements,
-        key=lambda r: r.start_offset,
-        reverse=True,
-    ):
-        result = result[: rep.start_offset] + rep.new_text + result[rep.end_offset :]
-
-    return result
+    return _apply_replacements(code, tree, formatter.replacements, logger)
 
 
 def _format_cells(
@@ -858,16 +943,8 @@ def _format_python_source(
     if not formatter.replacements:
         return source, False
 
-    result = source
-    for rep in sorted(
-        formatter.replacements,
-        key=lambda r: r.start_offset,
-        reverse=True,
-    ):
-        result = result[: rep.start_offset] + rep.new_text + result[rep.end_offset :]
-
-    changed = result != source
-    return result, changed
+    result = _apply_replacements(source, tree, formatter.replacements, logger)
+    return result, result != source
 
 
 def process_notebook(

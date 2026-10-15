@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Query parameters were corrupted with the postgres, duckdb and bigquery dialects.** `%s`/`?` parameters became `%(AUTO_PLACEHOLDER_0)s`, `$AUTO_PLACEHOLDER_0` or `@AUTO_PLACEHOLDER_0`, and f-string fields became `%({table})s`, `${table}` or `@{table}`, because the temporary stand-ins were named parameters, which each dialect prints differently. Stand-ins are now plain identifiers, which every dialect prints unchanged, and a string is skipped if any stand-in doesn't come back intact. Queries with 11 or more parameters were also mangled (`_1` matched inside `_10`)
+- **Non-ASCII text could break the file.** AST column offsets count UTF-8 bytes, but they were used as character positions, so with `é`, `日本語` or emoji on the same line, a rewrite was cut at the wrong place (e.g. deleting the closing `)` of `cursor.execute("… 'é' …")`)
+- **F-string fields lost their quotes or format.** `b = '{y}'` became `b = {y}`, and conversions and format specs (`{x!r}`, `{y:>3}`) were dropped. F-strings containing backslashes or literal braces are now formatted correctly instead of being skipped
+- **Whole-file safety net:** after all rewrites, the edited source is parsed again and every string literal is compared with the original (untouched ones) or its intended value (rewritten ones). If anything differs, the file is left unchanged and a warning asks for a bug report. Strings that are skipped because they can't be written back safely are now reported as warnings with their line number
 - **Rewritten SQL strings could corrupt the code.** When writing formatted SQL back, sqlnbfmt now keeps the value of the string exactly. In particular:
   - backslash escapes are preserved (`'\\n'` used to become a real newline)
   - the raw `r` prefix is kept (dropping it turned `\_` into an invalid escape)
