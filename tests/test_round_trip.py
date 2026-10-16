@@ -393,3 +393,128 @@ def test_one_bad_rewrite_does_not_discard_the_others(monkeypatch, caplog):
     assert "FROM good" in result
     assert 'pd.read_sql("select a, b from bad where c = 1 and d = 2")' in result
     assert "line 2" in caplog.text
+
+
+# --- Final #34 review: the dialect's tokenizer decides what is a string -----
+
+
+@pytest.mark.parametrize(
+    ("source", "dialect"),
+    [
+        # Moved into a string: INTERVAL %s DAY -> INTERVAL '%s DAY'
+        (
+            'cursor.execute("SELECT * FROM t WHERE ts > now() - INTERVAL %s DAY", p)\n',
+            "postgres",
+        ),
+        ('q = f"SELECT * FROM t WHERE ts > now() - INTERVAL {span}"\n', "postgres"),
+        # Parenthesized: breaks psycopg2's execute_values
+        ('execute_values(cur, "INSERT INTO t (a, b) VALUES %s", rows)\n', "postgres"),
+        ('q = f"INSERT INTO t (a, b) VALUES {values_sql}"\n', None),
+        # Aliased: SELECT {distinct} a -> SELECT {distinct} AS a
+        ('q = f"SELECT {distinct} a, b FROM t WHERE x = 1"\n', None),
+        # The scanner used to misread '\' and -- don't, hiding these from checks
+        (
+            (
+                "cursor.execute(\"SELECT replace(p, '\\\\', '/') AS q FROM t "
+                "WHERE k = ? AND c = 'x' ORDER BY q LIMIT ?\", p)\n"
+            ),
+            "tsql",
+        ),
+        (
+            'cursor.execute("SELECT a FROM t OFFSET %s LIMIT %s -- don\'t", p)\n',
+            "postgres",
+        ),
+    ],
+    ids=[
+        "interval-param",
+        "interval-field",
+        "values-param",
+        "values-field",
+        "distinct-field",
+        "backslash-string-tsql-top",
+        "quote-in-comment-offset-limit",
+    ],
+)
+def test_placeholders_are_not_quoted_parenthesized_or_aliased(source, dialect, caplog):
+    caplog.set_level(logging.WARNING)
+    assert fmt(source, dialect) == source
+    assert "SQL formatting skipped" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("dialect", "sql"),
+    [
+        (
+            "postgres",
+            "SELECT replace(p, '\\\\', '/') AS q FROM t WHERE id = :id AND c = 'x'",
+        ),
+        (
+            "duckdb",
+            "SELECT replace(p, '\\\\', '/') AS q FROM t WHERE id = :id AND c = 'x'",
+        ),
+        ("postgres", "SELECT $$it's$$ AS q, b FROM t WHERE id = :id AND c = 'x'"),
+        ("bigquery", "SELECT a FROM t # don't\\nWHERE b = :id AND c = 'x'"),
+    ],
+    ids=["postgres-backslash", "duckdb-backslash", "dollar-quoted", "hash-comment"],
+)
+def test_parameters_after_dialect_specific_quoting_are_kept(dialect, sql):
+    source = f'cursor.execute("{sql}", p)\n'
+    formatted = fmt(source, dialect)
+    assert formatted.count(":id") == 1
+    assert_same_meaning(source, formatted, dialect)
+
+
+@pytest.mark.parametrize(
+    ("dialect", "sql", "value"),
+    [
+        (
+            "postgres",
+            "SELECT * FROM t WHERE p LIKE 'a\\\\_%' ESCAPE '\\\\' AND note = 'l1\nl2'",
+            "'l1\nl2'",
+        ),
+        ("mysql", "SELECT a AS `x\ny` FROM t WHERE b = 1", "`x\ny`"),
+        ("tsql", "SELECT a AS [x\ny] FROM t WHERE b = 1", "[x\ny]"),
+    ],
+    ids=["after-backslash-string", "backtick-name", "bracket-name"],
+)
+def test_multiline_values_in_every_dialect_keep_their_value(dialect, sql, value):
+    source = f'def _():\n    cursor.execute("""{sql}""")\n'
+    formatted = fmt(source, dialect)
+    assert formatted != source
+    assert value in formatted
+
+
+def test_dollar_quoted_function_body_is_kept_verbatim():
+    body = (
+        'rows = plpy.execute("SELECT name FROM users")\n'
+        "# don't fail when empty\n"
+        "if not rows:\n"
+        "    return None\n"
+        "return rows[0]['name']\n"
+    )
+    source = (
+        "def setup(cur):\n"
+        '    cur.execute("""CREATE FUNCTION first_name() RETURNS text AS $$\n'
+        f'{body}$$ LANGUAGE plpython3u""")\n'
+    )
+    formatted = fmt(source, "postgres")
+    assert formatted != source
+    assert f"$$\n{body}$$" in formatted
+
+
+def test_skip_hint_with_carriage_returns():
+    source = "x = 1\r# sqlnbfmt: skip\rq = 'SELECT a, b FROM t WHERE c = 1'"
+    assert format_cell_source(source, FormattingConfig(), None, LOGGER) == source
+
+
+def test_cell_magic_with_carriage_return_keeps_its_sql():
+    source = "%%sql\rSELECT a, b FROM t WHERE c = 1"
+    formatted = format_cell_source(source, FormattingConfig(), None, LOGGER)
+    assert formatted.startswith("%%sql\n")
+    assert "FROM t" in formatted
+
+
+def test_line_magic_keeps_the_lines_after_it():
+    source = "# setup\n%sql select a, b from t where c = 1\nx = _\nprint(x)"
+    formatted = format_cell_source(source, FormattingConfig(), None, LOGGER)
+    assert formatted == "# setup\n%sql SELECT a, b FROM t WHERE c = 1\nx = _\nprint(x)"
