@@ -161,21 +161,23 @@ When `--config` is given, `pyproject.toml` discovery is skipped. Options you don
 |--------|-------------|---------|
 | `dialect` | SQL dialect passed to sqlglot (e.g. `postgres`, `mysql`, `bigquery`); `--dialect` overrides it | none (generic SQL) |
 | `sql_keywords` | SQL keywords to recognize and format | Common SQL keywords |
-| `function_names` | Python functions containing SQL code (see [matching](#how-function-names-match)) | `read_sql`, `execute`, `sql` (Marimo's `mo.sql`), etc. |
-| `sql_decorators` | Decorators indicating SQL code | `query`, `sql_query`, etc. |
+| `function_names` | Python functions containing SQL code (see [matching](#how-function-and-decorator-names-match)) | `read_sql`, `execute`, `sql` (Marimo's `mo.sql`), etc. |
+| `sql_decorators` | Decorators whose SQL is formatted: string arguments of `@query("SELECT ...")`, and strings returned by a function decorated with `@query` | `query`, `db_query`, `sql_query`, `sql_decorator` |
 | `extend_sql_keywords`, `extend_function_names`, `extend_sql_decorators` | Entries added to the corresponding list instead of replacing it | none |
 | `formatting_options.single_line_threshold` | **Deprecated:** never had any effect and will be removed. Line breaks are decided by sqlglot | |
 | `formatting_options.indent_width` | Number of spaces for indentation | 4 |
 
 To add to the built-in lists, use the `extend_*` options. `sql_keywords`, `function_names` and `sql_decorators` **replace** the built-in lists, so setting `function_names = ["run_query"]` drops `sql`, and Marimo's `mo.sql()` calls stop being formatted. If you do replace a list, copy the defaults you still rely on from the [template](https://github.com/flyersworder/sqlnbfmt/blob/main/config.yaml). You can set both: the `extend_*` entries are added to your replacement list.
 
-### How function names match
+### How function and decorator names match
 
 A call counts as SQL-bearing when a configured name appears **anywhere** in its full dotted name. Matching is case-sensitive. This is deliberately permissive, so that wrappers and variants are covered without configuration:
 
 - `execute` matches `cursor.execute`, `cursor.executemany` and `execute_sql`
 - `sql` matches `mo.sql`, `spark.sql`, pandasql's `sqldf`/`pysqldf` and `sqlalchemy.text`
 - `sql` does **not** match `runSQLQuery`, because matching is case-sensitive; add `SQL` if you need it
+
+Decorator names in `sql_decorators` match the same way, against the decorator's dotted name (`query` matches `@query`, `@db_query` and `@app.query(...)`).
 
 A matched call's string arguments are only reformatted if they look like SQL. Still, prefer specific names: `run` would also match `rerun(...)` and `subprocess.run(...)`, so use `run_query` rather than `run`.
 

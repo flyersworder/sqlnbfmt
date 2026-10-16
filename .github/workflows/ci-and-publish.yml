@@ -29,6 +29,8 @@ jobs:
       - run: uv python install 3.12
       - run: uv sync --all-extras --dev --frozen
       - run: uv run pytest
+      # Also the oldest sqlglot that pyproject.toml allows (keep in sync)
+      - run: uv run --isolated --with "sqlglot==25.27.0" pytest
 
   security:
     runs-on: ubuntu-latest

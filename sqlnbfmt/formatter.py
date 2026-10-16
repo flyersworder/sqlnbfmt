@@ -7,13 +7,15 @@ import sys
 import textwrap
 import tomllib
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import nbformat
 import yaml
-from sqlglot import errors, parse
+from sqlglot import errors, exp, parse
 from sqlglot.dialects.dialect import Dialect
+from sqlglot.tokens import Token, TokenType
 
 DEFAULT_SQL_KEYWORDS = frozenset(
     {
@@ -73,6 +75,9 @@ class SQLReplacement:
     start_offset: int
     end_offset: int
     new_text: str
+    # The string literal being replaced and the template it must evaluate to
+    node: ast.AST | None = None
+    intended: tuple | None = None
 
 
 @dataclass
@@ -95,6 +100,15 @@ class FormattingConfig:
 
 class SQLFormattingError(Exception):
     """Custom exception for SQL formatting errors."""
+
+
+class UnsafeFormattingError(SQLFormattingError):
+    """The SQL parses, but formatting it would change what it means; the string
+    is left as is, with a warning."""
+
+
+class PlaceholderMovedError(UnsafeFormattingError):
+    """sqlglot would move or rewrap a query parameter or f-string field."""
 
 
 class ConfigError(ValueError):
@@ -289,27 +303,213 @@ def load_config(config_path: str | Path | None = None) -> FormattingConfig:
     return _config_from_dict(config or {})
 
 
+# Line breaks as Python's tokenizer sees them (a lone "\r" counts too)
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+
 def build_line_offsets(source: str) -> list:
     """Returns list where offsets[i] is the character offset of line i+1 in source."""
     offsets = [0]
-    for i, ch in enumerate(source):
-        if ch == "\n":
-            offsets.append(i + 1)
+    offsets.extend(match.end() for match in _LINE_BREAK.finditer(source))
     return offsets
 
 
-def node_offsets(node: ast.AST, line_offsets: list) -> tuple[int, int]:
+def _char_column(source: str, line_start: int, byte_column: int) -> int:
+    """Converts an AST column (UTF-8 bytes) to a character column."""
+    # A line's first n characters encode to at least n bytes, so this slice
+    # covers the byte column; the column always falls on a character boundary.
+    prefix = source[line_start : line_start + byte_column]
+    if prefix.isascii():
+        return byte_column
+    return len(prefix.encode("utf-8")[:byte_column].decode("utf-8"))
+
+
+def node_offsets(node: ast.AST, line_offsets: list, source: str) -> tuple[int, int]:
     """Converts AST node line/col positions to (start, end) character offsets."""
-    start = line_offsets[node.lineno - 1] + node.col_offset
-    end = line_offsets[node.end_lineno - 1] + node.end_col_offset
-    return start, end
+    start_line = line_offsets[node.lineno - 1]
+    end_line = line_offsets[node.end_lineno - 1]
+    return (
+        start_line + _char_column(source, start_line, node.col_offset),
+        end_line + _char_column(source, end_line, node.end_col_offset),
+    )
+
+
+# Query parameter styles: %(name)s (pyformat), %s (format), ? (qmark),
+# :name and :1 (named, numeric), $1. Matches inside SQL strings and comments
+# are text, not parameters; sqlglot's tokenizer tells them apart.
+_PARAMETER = re.compile(r"%%|%\(\w+\)s|%s|\?|(?<![:\w]):\w+|\$\d+")
+# Drivers fill these in by position anywhere in the text, even in comments
+_POSITIONAL = re.compile(r"%%|%s|\?")
+
+# Tokens whose text is a value (string literals, quoted names), as opposed to
+# SQL code. Comments aren't tokens: sqlglot attaches them to a neighbour.
+# Looked up by name: older sqlglot versions lack some (NATIONAL_RAW_STRING).
+_LITERAL_TOKENS = {
+    getattr(TokenType, name)
+    for name in (
+        "STRING",
+        "IDENTIFIER",
+        "BIT_STRING",
+        "HEX_STRING",
+        "BYTE_STRING",
+        "NATIONAL_STRING",
+        "NATIONAL_RAW_STRING",
+        "RAW_STRING",
+        "HEREDOC_STRING",
+        "UNICODE_STRING",
+    )
+    if hasattr(TokenType, name)
+}
+
+
+def _tokenize(sql: str, dialect: str | None) -> list[Token]:
+    """sqlglot's tokens for ``sql``, so quoting follows the dialect's rules
+    (e.g. ``'\\'`` is a complete string in postgres, $$...$$ is one string)."""
+    try:
+        return Dialect.get_or_raise(dialect).tokenize(sql)
+    except errors.TokenError as e:
+        raise SQLFormattingError(f"Failed to tokenize SQL code: {e}") from e
+
+
+def _unique_prefix(text: str, base: str) -> str:
+    """``base``, extended until it doesn't occur in ``text`` (case-insensitively)."""
+    lowered = text.lower()
+    prefix = base
+    while prefix.lower() in lowered:
+        prefix += "X"
+    return prefix
+
+
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _newlines_in_values(sql: str, dialect: str | None) -> set[int]:
+    """Positions of line breaks inside a SQL string, quoted name or block comment.
+
+    Re-indenting those would change a string's value, or make a comment grow
+    on every run (sqlglot keeps comment text as written).
+    """
+    positions: set[int] = set()
+
+    def add(start: int, text: str) -> None:
+        positions.update(start + i for i, ch in enumerate(text) if ch == "\n")
+
+    gap_start = 0  # text between tokens is whitespace and comments
+    for token in [*_tokenize(sql, dialect), None]:
+        gap_end = token.start if token else len(sql)
+        for comment in _BLOCK_COMMENT.finditer(sql, gap_start, gap_end):
+            add(comment.start(), comment.group(0))
+        if token is None:
+            break
+        if token.token_type in _LITERAL_TOKENS:
+            add(token.start, sql[token.start : token.end + 1])
+        gap_start = token.end + 1
+    return positions
+
+
+def _stand_in_uses(
+    sql: str, tokens: list[Token], stand_ins: set[str]
+) -> tuple[dict[str, list[bool]], list[str]]:
+    """Per stand-in, each use as a code token: whether it's wrapped in parens;
+    and the source of each literal containing one (e.g. '%{v}%')."""
+    uses: dict[str, list[bool]] = {token: [] for token in stand_ins}
+    literals = []
+    for i, token in enumerate(tokens):
+        if token.token_type in _LITERAL_TOKENS:
+            source = sql[token.start : token.end + 1]
+            if any(stand_in in source for stand_in in stand_ins):
+                literals.append(source)
+            continue
+        if token.text not in stand_ins:
+            continue
+        before = tokens[i - 1].token_type if i > 0 else None
+        after = tokens[i + 1].token_type if i + 1 < len(tokens) else None
+        uses[token.text].append(
+            before == TokenType.L_PAREN and after == TokenType.R_PAREN
+        )
+    return {token: sorted(found) for token, found in uses.items()}, sorted(literals)
+
+
+def _unquoted(statements: list) -> list:
+    """The statements with identifiers unquoted, for comparing meaning: sqlglot
+    may quote a name the dialect reserves (rank -> `rank`), which is harmless."""
+
+    def unquote(node: exp.Expression) -> exp.Expression:
+        if isinstance(node, exp.Identifier) and node.quoted:
+            return exp.Identifier(this=node.this, quoted=False)
+        return node
+
+    return [stmt.transform(unquote) if stmt else stmt for stmt in statements]
+
+
+def _check_placeholders(
+    statements: list,
+    original_sql: str,
+    formatted_sql: str,
+    dialect: str | None,
+    stand_ins: list[str],
+) -> None:
+    """Raises PlaceholderMovedError if formatting moved or reinterpreted one.
+
+    Stand-ins hold code we can't see (a parameter's value, an f-string field
+    that may be a whole clause), so formatting must leave each one where it was:
+
+    - Each one is still a code token, as often as before: not moved into a
+      string (INTERVAL %s DAY -> INTERVAL '%s DAY') or a comment. A string
+      holding one is written exactly as before: a field's value may contain
+      quotes or backslashes, so "{name}" -> '{name}' or $${v}$$ -> '{v}' breaks.
+    - No parentheses added around it (VALUES %s -> VALUES (%s) breaks
+      psycopg2's execute_values) and no alias made of it (SELECT {distinct} a
+      -> SELECT {distinct} AS a).
+    - A stand-in isn't turned into an alias, or into the expression an alias
+      names, unless the original wrote AS there: in f"FROM t {where_clause}"
+      sqlglot reads the field as a table alias and prints FROM t AS {where_clause}.
+    """
+    if not stand_ins:
+        return
+    names = set(stand_ins)
+    original_tokens = _tokenize(original_sql, dialect)
+    formatted_tokens = _tokenize(formatted_sql, dialect)
+    for token in stand_ins:
+        if formatted_sql.count(token) != original_sql.count(token):
+            raise PlaceholderMovedError(f"formatting would alter placeholder {token}")
+    if _stand_in_uses(formatted_sql, formatted_tokens, names) != _stand_in_uses(
+        original_sql, original_tokens, names
+    ):
+        raise PlaceholderMovedError(
+            "formatting would quote or parenthesize a query parameter or f-string field"
+        )
+    upper_stand_ins = {token.upper() for token in stand_ins}
+    for statement in statements:
+        for alias in statement.find_all(exp.Alias, exp.TableAlias):
+            name = alias.alias if isinstance(alias, exp.Alias) else alias.name
+            if name.upper() in upper_stand_ins and not re.search(
+                rf"\bAS\s+{re.escape(name)}\b", original_sql, re.IGNORECASE
+            ):
+                raise PlaceholderMovedError(
+                    "formatting would turn an f-string field or parameter into an alias"
+                )
+            # SELECT {distinct} a: the field isn't the aliased expression
+            aliased = alias.this
+            if (
+                isinstance(alias, exp.Alias)
+                and isinstance(aliased, exp.Column)
+                and not aliased.table
+                and aliased.name.upper() in upper_stand_ins
+                and not re.search(
+                    rf"\b{re.escape(aliased.name)}\s+AS\b", original_sql, re.IGNORECASE
+                )
+            ):
+                raise PlaceholderMovedError(
+                    "formatting would alias an f-string field or parameter"
+                )
 
 
 def format_sql_code(
     sql_code: str,
     dialect: str | None,
     config: FormattingConfig,
-    placeholders: dict[str, str] | None = None,
+    placeholders: Iterable[str] | None = None,
     force_single_line: bool = False,
     is_magic_command: bool = False,
     is_cell_magic: bool = False,
@@ -321,7 +521,9 @@ def format_sql_code(
         sql_code (str): The original SQL code to format.
         dialect (Optional[str]): The SQL dialect to use (e.g., 'postgres', 'mysql').
         config (FormattingConfig): The formatting configuration.
-        placeholders (Optional[Dict[str, str]]): A mapping of placeholders to their expressions.
+        placeholders (Optional[Iterable[str]]): Stand-in tokens for f-string fields
+            that are already present in ``sql_code`` (see extract_fstring_parts).
+            They come back unchanged; the caller restores the fields.
         force_single_line (bool): Whether to force the formatted SQL into a single line.
         is_magic_command (bool): Whether the SQL code comes from a magic command.
         is_cell_magic (bool): Whether the SQL code comes from a cell magic command.
@@ -337,69 +539,87 @@ def format_sql_code(
 
         temp_sql = sql_code
 
-        # Handle placeholders in f-strings
-        placeholder_mapping = {}
-        if placeholders:
-            for placeholder in placeholders:
-                # Replace placeholder with a valid SQL parameter
-                temp_placeholder = f":{placeholder}"
-                temp_sql = temp_sql.replace(placeholder, temp_placeholder)
-                placeholder_mapping[temp_placeholder] = placeholder
+        # Query parameters (%s, ?, %(name)s, :name, $1) and f-string fields
+        # (already replaced by the caller) are swapped for plain identifiers:
+        # every dialect prints those unchanged, whereas sqlglot rewrites
+        # parameters per dialect (%(name)s, $name, @name). The prefix never
+        # occurs in the SQL, so stand-ins can't collide with the user's text.
+        prefix = _unique_prefix(temp_sql, "SQLNBFMT_P")
+        parameters: dict[str, str] = {}
+        is_code = bytearray(len(temp_sql))  # 1 where a code token is
+        for token in _tokenize(temp_sql, dialect):
+            if token.token_type not in _LITERAL_TOKENS:
+                is_code[token.start : token.end + 1] = b"\x01" * (
+                    token.end + 1 - token.start
+                )
 
-        # Handle automatic placeholders (%s, ?)
-        auto_placeholder_pattern = re.compile(r"%s|\?")
-        auto_placeholders = auto_placeholder_pattern.findall(temp_sql)
-        auto_placeholder_mapping = {}
-        for idx, ph in enumerate(auto_placeholders):
-            temp_placeholder = f":AUTO_PLACEHOLDER_{idx}"
-            temp_sql = temp_sql.replace(ph, temp_placeholder, 1)
-            auto_placeholder_mapping[temp_placeholder] = ph
+        def stand_in(match: re.Match) -> str:
+            if match.group(0) == "%%" or not all(is_code[match.start() : match.end()]):
+                return match.group(0)  # in a string or comment: text, keep as is
+            token = f"{prefix}{len(parameters)}_"
+            parameters[token] = match.group(0)
+            return token
+
+        temp_sql = _PARAMETER.sub(stand_in, temp_sql)
+        stand_ins = [*(placeholders or ()), *parameters]
 
         temp_sql = temp_sql.strip()
 
         # Parse and format SQL
         statements = parse(temp_sql, read=dialect)
+        # Placeholders left in the tree are styles we don't swap (PySpark's
+        # {name}, duckdb's $name); fine if printed back as written, otherwise
+        # sqlglot would rewrite them for the dialect
+        for stmt in statements:
+            for placeholder in stmt.find_all(exp.Placeholder) if stmt else ():
+                if placeholder.sql(dialect=dialect) not in temp_sql:
+                    raise PlaceholderMovedError(
+                        "the SQL has a query parameter that formatting could rewrite"
+                    )
+
+        # A line magic must stay on one line; collapsing whitespace instead
+        # would change strings ('a  b' -> 'a b')
+        single_line = force_single_line or (is_magic_command and not is_cell_magic)
         formatted_parts = []
         for stmt in statements:
             formatted_parts.append(
                 stmt.sql(
-                    pretty=not force_single_line,
+                    pretty=not single_line,
                     indent=config.indent_width,
                     dialect=dialect,
                 )
             )
-        separator = "; " if force_single_line else ";\n"
-        formatted_sql = separator.join(formatted_parts)
+        separator = "; " if single_line else ";\n"
+        formatted_sql = separator.join(formatted_parts).strip()
+        if single_line and "\n" in formatted_sql:
+            raise SQLFormattingError("the SQL doesn't fit on one line")
 
-        # Apply formatting based on context
-        if is_magic_command and not is_cell_magic:
-            # Line magic: single line
-            formatted_sql = " ".join(formatted_sql.split())
-        elif force_single_line:
-            formatted_sql = " ".join(formatted_sql.split())
-        else:
-            formatted_sql = formatted_sql.strip()
+        _check_placeholders(statements, temp_sql, formatted_sql, dialect, stand_ins)
 
-        # Restore placeholders in f-strings
-        if placeholders:
-            for temp_placeholder, original_placeholder in placeholder_mapping.items():
-                # Remove quotes around placeholders if any
-                formatted_sql = formatted_sql.replace(
-                    f"'{temp_placeholder}'", temp_placeholder
-                )
-                formatted_sql = formatted_sql.replace(
-                    f'"{temp_placeholder}"', temp_placeholder
-                )
-                # Replace temp placeholders with original placeholders
-                formatted_sql = formatted_sql.replace(
-                    temp_placeholder, original_placeholder
-                )
+        # The output must mean what the input did: guards against printer bugs
+        # in the sqlglot versions we support (e.g. before 30.23, pretty output
+        # indented the second line of a quoted name like `x\ny`)
+        if _unquoted(parse(formatted_sql, read=dialect)) != _unquoted(statements):
+            raise UnsafeFormattingError("the formatted SQL would read differently")
 
-        # Restore automatic placeholders
-        for temp_placeholder, original_placeholder in auto_placeholder_mapping.items():
-            formatted_sql = formatted_sql.replace(
-                temp_placeholder, original_placeholder
+        # %s and ? bind by position, wherever they are (drivers fill them in
+        # even inside comments), so their order must not change: sqlglot
+        # reorders OFFSET/LIMIT, turns LIMIT ? into T-SQL TOP (?), and moves
+        # or drops comments. Stand-ins make each parameter distinguishable.
+        positional = [t for t, p in parameters.items() if p in ("%s", "?")]
+        order = re.compile("|".join([*map(re.escape, positional), _POSITIONAL.pattern]))
+
+        def positional_order(text: str) -> list[str]:
+            return [m for m in order.findall(text) if m != "%%"]
+
+        if positional_order(formatted_sql) != positional_order(temp_sql):
+            raise PlaceholderMovedError(
+                "formatting would reorder positional query parameters"
             )
+
+        # Restore query parameters; f-string fields are restored by the caller
+        for token, original in parameters.items():
+            formatted_sql = formatted_sql.replace(token, original)
 
         # Logging for debugging purposes
         logger.debug(f"Original SQL:\n{sql_code}")
@@ -407,10 +627,121 @@ def format_sql_code(
 
         return formatted_sql
 
+    except SQLFormattingError:
+        raise  # our own errors (e.g. UnsafeFormattingError) keep their type
     except errors.ParseError as e:
         raise SQLFormattingError(f"Failed to parse SQL code: {e}")
     except Exception as e:  # noqa: BLE001 - sqlglot raises many types; normalize them
         raise SQLFormattingError(f"Unexpected error during SQL formatting: {e}")
+
+
+_STRING_PREFIX = re.compile(r"[A-Za-z]*")
+
+
+def _normalize_template(parts: list[tuple[str, str]]) -> tuple:
+    merged: list[tuple[str, str]] = []
+    for kind, content in parts:
+        if kind == "text" and not content:
+            continue
+        if kind == "text" and merged and merged[-1][0] == "text":
+            merged[-1] = ("text", merged[-1][1] + content)
+        else:
+            merged.append((kind, content))
+    return ("fstring", tuple(merged))
+
+
+def literal_template(node: ast.AST) -> tuple | None:
+    """What a string literal evaluates to: its value, or for an f-string its text
+    and replacement fields. Used to check that rewrites keep the meaning."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return ("str", node.value)
+    if isinstance(node, ast.JoinedStr):
+        return _normalize_template(
+            [
+                ("text", part.value)
+                if isinstance(part, ast.Constant)
+                else ("expr", ast.dump(part))
+                for part in node.values
+            ]
+        )
+    return None
+
+
+def _string_literals(tree: ast.AST) -> list[ast.AST]:
+    """Top-level string literals (not the parts inside f-strings), in source order."""
+    found = []
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if literal_template(node) is not None:
+            found.append(node)
+        else:
+            stack.extend(ast.iter_child_nodes(node))
+    return sorted(found, key=lambda n: (n.lineno, n.col_offset))
+
+
+def _splice(source: str, replacements: list[SQLReplacement]) -> str:
+    result = source
+    for rep in sorted(replacements, key=lambda r: r.start_offset, reverse=True):
+        result = result[: rep.start_offset] + rep.new_text + result[rep.end_offset :]
+    return result
+
+
+def _is_faithful(
+    tree: ast.AST, result: str, replacements: list[SQLReplacement]
+) -> bool:
+    """The edited source parses, with the same string literals in the same order,
+    untouched ones unchanged and rewritten ones equal to their intended template."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            new_tree = ast.parse(result)
+    except SyntaxError:
+        return False
+    intended = {id(rep.node): rep.intended for rep in replacements}
+    old_literals = _string_literals(tree)
+    new_literals = _string_literals(new_tree)
+    return len(old_literals) == len(new_literals) and all(
+        literal_template(new) == intended.get(id(old), literal_template(old))
+        for old, new in zip(old_literals, new_literals)
+    )
+
+
+def _apply_replacements(
+    source: str,
+    tree: ast.AST,
+    replacements: list[SQLReplacement],
+    logger: logging.Logger,
+) -> str:
+    """Applies the replacements that keep the code's meaning (safety net).
+
+    If the combined result fails the check, each rewrite is checked on its own;
+    failing ones are reported by line and dropped, the others still applied.
+    """
+    result = _splice(source, replacements)
+    if _is_faithful(tree, result, replacements):
+        return result
+
+    good = []
+    for rep in replacements:
+        if _is_faithful(tree, _splice(source, [rep]), [rep]):
+            good.append(rep)
+        else:
+            logger.warning(
+                f"line {rep.node.lineno}: SQL formatting skipped: the rewrite failed "
+                "the safety check, so this string was left unchanged. Please report "
+                "this at https://github.com/flyersworder/sqlnbfmt/issues"
+            )
+    if good and len(good) < len(replacements):
+        result = _splice(source, good)
+        if _is_faithful(tree, result, good):
+            return result
+    if good:
+        logger.warning(
+            "SQL formatting failed the safety check, so the code was left unchanged. "
+            "Please report this at https://github.com/flyersworder/sqlnbfmt/issues"
+        )
+    return source
 
 
 class SQLStringFormatter(ast.NodeVisitor):
@@ -431,7 +762,11 @@ class SQLStringFormatter(ast.NodeVisitor):
         self.line_offsets = line_offsets
         self.source = source
         self.replacements: list = []
-        self.changed = False
+        # ids of decorator calls matching sql_decorators, e.g. @query("SELECT ..."),
+        # recorded by visit_FunctionDef/visit_ClassDef before generic_visit
+        # reaches them. visit_Call then formats their arguments, so each call is
+        # handled in one place even if it also matches function_names.
+        self._sql_decorator_calls: set[int] = set()
 
     def is_likely_sql(self, code: str) -> bool:
         """Enhanced SQL detection with better heuristics."""
@@ -458,26 +793,26 @@ class SQLStringFormatter(ast.NodeVisitor):
 
         return keyword_count >= 2 or has_sql_pattern
 
-    def extract_fstring_parts(self, node: ast.JoinedStr) -> tuple[str, dict[str, str]]:
-        """Extracts parts of an f-string, preserving expressions."""
+    @staticmethod
+    def extract_fstring_parts(
+        node: ast.JoinedStr,
+    ) -> tuple[str, dict[str, ast.FormattedValue]]:
+        """The f-string's SQL with a token for each ``{...}``, and token -> node.
+
+        Tokens are plain identifiers with a prefix that doesn't occur in the
+        f-string's text, and a trailing "_" so _1_ is not a prefix of _10_.
+        """
+        text = "".join(v.value for v in node.values if isinstance(v, ast.Constant))
+        prefix = _unique_prefix(text, "SQLNBFMT_F")
         sql_parts = []
         placeholders = {}
-        placeholder_counter = 0
-
-        # Handle empty f-strings or f-strings with only constants
-        if all(isinstance(value, ast.Constant) for value in node.values):
-            return "".join(value.value for value in node.values), {}
-
         for value in node.values:
             if isinstance(value, ast.Constant):
                 sql_parts.append(value.value)
             elif isinstance(value, ast.FormattedValue):
-                expr = ast.unparse(value.value)
-                placeholder = f"PLACEHOLDER_{placeholder_counter}"
+                placeholder = f"{prefix}{len(placeholders)}_"
                 sql_parts.append(placeholder)
-                placeholders[placeholder] = expr
-                placeholder_counter += 1
-
+                placeholders[placeholder] = value
         return "".join(sql_parts), placeholders
 
     def format_sql_node(
@@ -485,8 +820,8 @@ class SQLStringFormatter(ast.NodeVisitor):
         node: ast.Constant | ast.JoinedStr,
         force_single_line: bool = False,
         block_indent: str | None = None,
-    ) -> str | None:
-        """Formats SQL code in AST nodes. Returns replacement text or None."""
+    ) -> tuple[str, tuple] | None:
+        """Formats SQL in a string literal: (replacement literal, template) or None."""
         try:
             placeholders = {}
 
@@ -506,33 +841,27 @@ class SQLStringFormatter(ast.NodeVisitor):
                     sql_str,
                     self.dialect,
                     self.config,
-                    placeholders=placeholders if placeholders else None,
+                    placeholders=placeholders or None,
                     force_single_line=force_single_line,
                 )
+            except UnsafeFormattingError as e:
+                self.logger.warning(f"line {node.lineno}: SQL formatting skipped: {e}")
+                return None
             except SQLFormattingError:
                 return None
 
             if formatted_sql == textwrap.dedent(sql_str).strip():
                 return None
 
-            # Restore placeholders as f-string expressions
-            if placeholders:
-                for ph in placeholders:
-                    formatted_sql = formatted_sql.replace(f"'{ph}'", ph)
-                    formatted_sql = formatted_sql.replace(f'"{ph}"', ph)
-                for ph, expr in placeholders.items():
-                    formatted_sql = formatted_sql.replace(ph, f"{{{expr}}}")
-
             replacement = self._build_replacement_text(
-                formatted_sql, node, block_indent
+                formatted_sql, node, block_indent, placeholders
             )
             if replacement is None:
-                self.logger.debug(
-                    "SQL formatting skipped: the result can't be written back as "
-                    "an equivalent string literal"
+                self.logger.warning(
+                    f"line {node.lineno}: SQL formatting skipped: the formatted SQL "
+                    "can't be written back as an equivalent string literal"
                 )
                 return None
-            self.changed = True
             return replacement
 
         except SQLFormattingError as e:
@@ -547,95 +876,174 @@ class SQLStringFormatter(ast.NodeVisitor):
         formatted_sql: str,
         node: ast.Constant | ast.JoinedStr,
         block_indent: str | None,
-    ) -> str | None:
-        """Constructs the replacement string literal, or None if it can't be safe.
+        placeholders: dict[str, ast.FormattedValue],
+    ) -> tuple[str, tuple] | None:
+        """Constructs the replacement literal and its template, or None if unsafe.
 
         With ``block_indent`` (SQL passed to a call), the SQL lines and closing
         quotes are indented by it; where the block starts and what follows it is
         decided by the caller, see ``_layout_call_argument``.
         """
         if block_indent is not None and "\n" in formatted_sql:
-            lines = formatted_sql.split("\n")
-            indented_sql = "\n".join(
-                block_indent + line if line.strip() else line for line in lines
+            # Lines continuing a multi-line SQL string are part of its value
+            try:
+                in_string = _newlines_in_values(formatted_sql, self.dialect)
+            except SQLFormattingError:
+                return None
+            lines, position = [], 0
+            for i, line in enumerate(formatted_sql.split("\n")):
+                continues_string = i > 0 and position - 1 in in_string
+                indent = "" if continues_string or not line.strip() else block_indent
+                lines.append(indent + line)
+                position += len(line) + 1
+            indented_sql = "\n".join(lines)
+            return self._to_literal(
+                f"\n{indented_sql}\n{block_indent}", node, placeholders
             )
-            return self._to_literal(f"\n{indented_sql}\n{block_indent}", node)
         if "\n" in formatted_sql:
-            return self._to_literal(f"\n{formatted_sql}\n", node)
-        return self._to_literal(formatted_sql, node)
+            return self._to_literal(f"\n{formatted_sql}\n", node, placeholders)
+        return self._to_literal(formatted_sql, node, placeholders)
 
-    def _to_literal(self, value: str, node: ast.Constant | ast.JoinedStr) -> str | None:
-        """Writes ``value`` as a Python literal replacing ``node``, or returns None.
+    def _to_literal(
+        self,
+        text: str,
+        node: ast.Constant | ast.JoinedStr,
+        placeholders: dict[str, ast.FormattedValue],
+    ) -> tuple[str, tuple] | None:
+        """Writes ``text`` as a literal replacing ``node``: (literal, template).
 
-        Keeps the original raw (``r``) prefix, escapes backslashes otherwise, and
-        picks quotes that don't clash with the SQL. The result is parsed back and
-        must evaluate to ``value`` (for f-strings: keep the same placeholders);
-        a string that can't be written back faithfully is left alone.
+        ``text`` is the intended value, with f-string placeholder tokens in place
+        of ``{...}``. Keeps the original raw (``r``) prefix, escapes backslashes
+        otherwise, doubles literal braces in f-strings, and picks quotes that
+        don't clash. The literal is parsed back and must match the intended
+        template (see ``literal_template``); otherwise None.
         """
-        start, _ = node_offsets(node, self.line_offsets)
-        original_prefix = re.match(r"[A-Za-z]*", self.source[start:]).group()
-        raw = "r" in original_prefix.lower()
+        start = self._offsets(node)[0]
+        raw = "r" in _STRING_PREFIX.match(self.source, start).group().lower()
         is_fstring = isinstance(node, ast.JoinedStr)
         prefix = ("r" if raw else "") + ("f" if is_fstring else "")
-        if raw:
-            body = value
-        elif is_fstring and "\\" in value:
-            return None  # escaping could also touch the {expressions}
+
+        def escape(part: str) -> str:
+            if not raw:
+                part = part.replace("\\", "\\\\")
+            if is_fstring:
+                part = part.replace("{", "{{").replace("}", "}}")
+            return part
+
+        body_parts, template_parts = [], []
+        if placeholders:
+            token = re.compile("(" + "|".join(map(re.escape, placeholders)) + ")")
+            pieces = token.split(text)
         else:
-            body = value.replace("\\", "\\\\")
+            pieces = [text]
+        for piece in pieces:
+            if piece in placeholders:
+                # The field's own source, e.g. {d["k"]!r:>3}, copied verbatim
+                start, end = self._offsets(placeholders[piece])
+                body_parts.append(self.source[start:end])
+                template_parts.append(("expr", ast.dump(placeholders[piece])))
+            else:
+                body_parts.append(escape(piece))
+                template_parts.append(("text", piece))
+        body = "".join(body_parts)
+        intended = _normalize_template(template_parts) if is_fstring else ("str", text)
+        if raw and body.endswith("\\"):
+            return None
 
         quotes = ('"""', "'''") if "\n" in body else ('"', "'", '"""', "'''")
         for quote in quotes:
-            if (
-                quote in body
-                or body.endswith(quote[0])
-                or (raw and body.endswith("\\"))
-            ):
+            if quote in body or body.endswith(quote[0]):
                 continue
             literal = f"{prefix}{quote}{body}{quote}"
-            if self._literal_is_faithful(literal, value, node):
-                return literal
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")  # e.g. invalid escape sequences
+                    parsed = ast.parse(literal, mode="eval").body
+            except (SyntaxError, SyntaxWarning):
+                continue
+            if literal_template(parsed) == intended:
+                return literal, intended
         return None
 
-    @staticmethod
-    def _literal_is_faithful(
-        literal: str, value: str, node: ast.Constant | ast.JoinedStr
-    ) -> bool:
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("error")  # e.g. invalid escape sequences
-                parsed = ast.parse(literal, mode="eval").body
-        except (SyntaxError, SyntaxWarning):
-            return False
-        if isinstance(node, ast.JoinedStr):
+    def _offsets(self, node: ast.AST) -> tuple[int, int]:
+        return node_offsets(node, self.line_offsets, self.source)
 
-            def placeholders(fstring: ast.AST) -> list[str]:
-                return [
-                    ast.dump(part)
-                    for part in getattr(fstring, "values", [])
-                    if isinstance(part, ast.FormattedValue)
-                ]
-
-            return placeholders(parsed) == placeholders(node)
-        return isinstance(parsed, ast.Constant) and parsed.value == value
+    def _replace_string(self, value: ast.expr | None) -> None:
+        """Formats a string literal in place (assigned or returned SQL)."""
+        if isinstance(value, (ast.Constant, ast.JoinedStr)):
+            replacement = self.format_sql_node(value)
+            if replacement:
+                literal, intended = replacement
+                start, end = self._offsets(value)
+                self.replacements.append(
+                    SQLReplacement(start, end, literal, value, intended)
+                )
 
     def visit_Assign(self, node: ast.Assign) -> None:
         """Handles assignments."""
-        if isinstance(node.value, (ast.Constant, ast.JoinedStr)):
-            replacement_text = self.format_sql_node(node.value)
-            if replacement_text:
-                start, end = node_offsets(node.value, self.line_offsets)
-                self.replacements.append(SQLReplacement(start, end, replacement_text))
+        self._replace_string(node.value)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        """Handles function calls."""
+        """Handles function calls, including SQL decorators with arguments."""
         func_name = self.get_full_func_name(node.func)
-        if any(name in func_name for name in self.config.function_names):
+        if id(node) in self._sql_decorator_calls or any(
+            name in func_name for name in self.config.function_names
+        ):
             values = [*node.args, *(keyword.value for keyword in node.keywords)]
             for value in values:
                 if isinstance(value, (ast.Constant, ast.JoinedStr)):
                     self._replace_call_argument(node, value)
+        self.generic_visit(node)
+
+    def _is_sql_decorator(self, decorator: ast.expr) -> bool:
+        """Whether a decorator (``@query`` or ``@query(...)``) is in sql_decorators.
+
+        Names match as substrings of the dotted name, like function_names.
+        """
+        target = decorator.func if isinstance(decorator, ast.Call) else decorator
+        name = self.get_full_func_name(target)
+        return any(
+            decorator_name in name for decorator_name in self.config.sql_decorators
+        )
+
+    def _register_sql_decorators(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+    ) -> bool:
+        """Marks SQL decorator calls for visit_Call; returns whether any matched."""
+        matched = False
+        for decorator in node.decorator_list:
+            if self._is_sql_decorator(decorator):
+                matched = True
+                if isinstance(decorator, ast.Call):
+                    self._sql_decorator_calls.add(id(decorator))
+        return matched
+
+    @staticmethod
+    def _own_returns(func: ast.FunctionDef | ast.AsyncFunctionDef):
+        """Return statements of ``func`` itself, not of nested functions or classes."""
+        stack = list(func.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, ast.Return):
+                yield node
+            elif not isinstance(
+                node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
+            ):
+                stack.extend(ast.iter_child_nodes(node))
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """Formats SQL returned by functions decorated with an SQL decorator."""
+        if self._register_sql_decorators(node):
+            for ret in self._own_returns(node):
+                self._replace_string(ret.value)
+        self.generic_visit(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        """Registers SQL decorator calls on classes, e.g. @query("SELECT ...")."""
+        self._register_sql_decorators(node)
         self.generic_visit(node)
 
     def _replace_call_argument(
@@ -643,19 +1051,20 @@ class SQLStringFormatter(ast.NodeVisitor):
     ) -> None:
         """Formats a SQL argument, indented relative to the line the call starts on."""
         call_line_start = self.line_offsets[call.lineno - 1]
-        call_line = self.source[call_line_start:].partition("\n")[0]
+        call_line = _LINE_BREAK.split(self.source[call_line_start:], maxsplit=1)[0]
         base_indent = call_line[: len(call_line) - len(call_line.lstrip())]
         block_indent = base_indent + " " * self.config.indent_width
 
         replacement = self.format_sql_node(arg, block_indent=block_indent)
         if not replacement:
             return
-        start, end = node_offsets(arg, self.line_offsets)
-        if "\n" in replacement:
-            start, end, replacement = self._layout_call_argument(
-                start, end, replacement, base_indent, block_indent
+        literal, intended = replacement
+        start, end = self._offsets(arg)
+        if "\n" in literal:
+            start, end, literal = self._layout_call_argument(
+                start, end, literal, base_indent, block_indent
             )
-        self.replacements.append(SQLReplacement(start, end, replacement))
+        self.replacements.append(SQLReplacement(start, end, literal, arg, intended))
 
     def _layout_call_argument(
         self,
@@ -677,7 +1086,10 @@ class SQLStringFormatter(ast.NodeVisitor):
         the call's indentation; other arguments stay after the closing quotes, so
         code outside the string is never rewritten beyond whitespace.
         """
-        line_start = self.source.rfind("\n", 0, start) + 1
+        line_start = (
+            max(self.source.rfind("\n", 0, start), self.source.rfind("\r", 0, start))
+            + 1
+        )
         before = self.source[line_start:start]
         if not before.strip():
             start, block = line_start, block_indent + block
@@ -716,7 +1128,7 @@ def _has_skip_hint(source: str) -> bool:
     """
     return any(
         line.strip().startswith("#") and "sqlnbfmt: skip" in line
-        for line in source.split("\n")
+        for line in _LINE_BREAK.split(source)
     )
 
 
@@ -737,7 +1149,8 @@ def format_cell_source(
     if _has_skip_hint(code):
         return code
 
-    lines = code.split("\n")
+    lines = _LINE_BREAK.split(code)
+    line_starts = build_line_offsets(code)
 
     # Look for magic commands
     magic_cmd = None
@@ -759,11 +1172,23 @@ def format_cell_source(
 
     if magic_cmd:
         is_cell_magic = magic_cmd.startswith("%%sql")
+        magic_line = lines[magic_cmd_index]
+        line_start = line_starts[magic_cmd_index]
+        line_end = line_start + len(magic_line)
+        # The %%sql line (with arguments such as "df <<" or a connection) and
+        # everything before it, line breaks included, are kept as written
+        body_start = (
+            line_starts[magic_cmd_index + 1]
+            if magic_cmd_index + 1 < len(line_starts)
+            else len(code)
+        )
 
         if is_cell_magic:
-            sql_code = "\n".join(lines[magic_cmd_index + 1 :]).strip()
+            sql_code = code[body_start:].strip()
         else:
-            sql_code = lines[magic_cmd_index][len(magic_cmd) :].strip()
+            sql_code = magic_line.strip()[len(magic_cmd) :].strip()
+        if not sql_code:
+            return code
 
         try:
             formatted_sql = format_sql_code(
@@ -775,15 +1200,15 @@ def format_cell_source(
             )
 
             if is_cell_magic:
-                pre_magic = "\n".join(lines[:magic_cmd_index])
-                if pre_magic:
-                    return f"{pre_magic}\n{magic_cmd}\n{formatted_sql}"
-                return f"{magic_cmd}\n{formatted_sql}"
-            else:
-                pre_magic = "\n".join(lines[:magic_cmd_index])
-                if pre_magic:
-                    return f"{pre_magic}\n{magic_cmd} {formatted_sql}"
-                return f"{magic_cmd} {formatted_sql}"
+                if body_start == line_end:  # no line break after the magic line
+                    return f"{code[:line_end]}\n{formatted_sql}"
+                return code[:body_start] + formatted_sql
+            # Keep the lines before and after the line magic as they are
+            indent = magic_line[: len(magic_line) - len(magic_line.lstrip())]
+            return (
+                f"{code[:line_start]}{indent}{magic_cmd} {formatted_sql}"
+                + code[line_end:]
+            )
 
         except SQLFormattingError as e:
             logger.warning(f"SQL magic formatting skipped: {e}")
@@ -798,20 +1223,16 @@ def format_cell_source(
 
     line_offsets = build_line_offsets(code)
     formatter = SQLStringFormatter(config, dialect, logger, line_offsets, code)
-    formatter.visit(tree)
+    try:
+        formatter.visit(tree)
+    except Exception as e:  # noqa: BLE001 - never abort a whole run over one cell or file
+        logger.warning(f"SQL formatting skipped: unexpected error: {e}")
+        return code
 
     if not formatter.replacements:
         return code
 
-    result = code
-    for rep in sorted(
-        formatter.replacements,
-        key=lambda r: r.start_offset,
-        reverse=True,
-    ):
-        result = result[: rep.start_offset] + rep.new_text + result[rep.end_offset :]
-
-    return result
+    return _apply_replacements(code, tree, formatter.replacements, logger)
 
 
 def _format_cells(
@@ -860,21 +1281,17 @@ def _format_python_source(
 
     line_offsets = build_line_offsets(source)
     formatter = SQLStringFormatter(config, dialect, logger, line_offsets, source)
-    formatter.visit(tree)
+    try:
+        formatter.visit(tree)
+    except Exception as e:  # noqa: BLE001 - never abort a whole run over one cell or file
+        logger.warning(f"SQL formatting skipped: unexpected error: {e}")
+        return source, False
 
     if not formatter.replacements:
         return source, False
 
-    result = source
-    for rep in sorted(
-        formatter.replacements,
-        key=lambda r: r.start_offset,
-        reverse=True,
-    ):
-        result = result[: rep.start_offset] + rep.new_text + result[rep.end_offset :]
-
-    changed = result != source
-    return result, changed
+    result = _apply_replacements(source, tree, formatter.replacements, logger)
+    return result, result != source
 
 
 def process_notebook(
