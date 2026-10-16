@@ -755,6 +755,11 @@ class SQLStringFormatter(ast.NodeVisitor):
         self.line_offsets = line_offsets
         self.source = source
         self.replacements: list = []
+        # ids of decorator calls matching sql_decorators, e.g. @query("SELECT ..."),
+        # recorded by visit_FunctionDef/visit_ClassDef before generic_visit
+        # reaches them. visit_Call then formats their arguments, so each call is
+        # handled in one place even if it also matches function_names.
+        self._sql_decorator_calls: set[int] = set()
 
     def is_likely_sql(self, code: str) -> bool:
         """Enhanced SQL detection with better heuristics."""
@@ -956,26 +961,82 @@ class SQLStringFormatter(ast.NodeVisitor):
     def _offsets(self, node: ast.AST) -> tuple[int, int]:
         return node_offsets(node, self.line_offsets, self.source)
 
-    def visit_Assign(self, node: ast.Assign) -> None:
-        """Handles assignments."""
-        if isinstance(node.value, (ast.Constant, ast.JoinedStr)):
-            replacement = self.format_sql_node(node.value)
+    def _replace_string(self, value: ast.expr | None) -> None:
+        """Formats a string literal in place (assigned or returned SQL)."""
+        if isinstance(value, (ast.Constant, ast.JoinedStr)):
+            replacement = self.format_sql_node(value)
             if replacement:
                 literal, intended = replacement
-                start, end = self._offsets(node.value)
+                start, end = self._offsets(value)
                 self.replacements.append(
-                    SQLReplacement(start, end, literal, node.value, intended)
+                    SQLReplacement(start, end, literal, value, intended)
                 )
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        """Handles assignments."""
+        self._replace_string(node.value)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        """Handles function calls."""
+        """Handles function calls, including SQL decorators with arguments."""
         func_name = self.get_full_func_name(node.func)
-        if any(name in func_name for name in self.config.function_names):
+        if id(node) in self._sql_decorator_calls or any(
+            name in func_name for name in self.config.function_names
+        ):
             values = [*node.args, *(keyword.value for keyword in node.keywords)]
             for value in values:
                 if isinstance(value, (ast.Constant, ast.JoinedStr)):
                     self._replace_call_argument(node, value)
+        self.generic_visit(node)
+
+    def _is_sql_decorator(self, decorator: ast.expr) -> bool:
+        """Whether a decorator (``@query`` or ``@query(...)``) is in sql_decorators.
+
+        Names match as substrings of the dotted name, like function_names.
+        """
+        target = decorator.func if isinstance(decorator, ast.Call) else decorator
+        name = self.get_full_func_name(target)
+        return any(
+            decorator_name in name for decorator_name in self.config.sql_decorators
+        )
+
+    def _register_sql_decorators(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+    ) -> bool:
+        """Marks SQL decorator calls for visit_Call; returns whether any matched."""
+        matched = False
+        for decorator in node.decorator_list:
+            if self._is_sql_decorator(decorator):
+                matched = True
+                if isinstance(decorator, ast.Call):
+                    self._sql_decorator_calls.add(id(decorator))
+        return matched
+
+    @staticmethod
+    def _own_returns(func: ast.FunctionDef | ast.AsyncFunctionDef):
+        """Return statements of ``func`` itself, not of nested functions or classes."""
+        stack = list(func.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, ast.Return):
+                yield node
+            elif not isinstance(
+                node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
+            ):
+                stack.extend(ast.iter_child_nodes(node))
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """Formats SQL returned by functions decorated with an SQL decorator."""
+        if self._register_sql_decorators(node):
+            for ret in self._own_returns(node):
+                self._replace_string(ret.value)
+        self.generic_visit(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        """Registers SQL decorator calls on classes, e.g. @query("SELECT ...")."""
+        self._register_sql_decorators(node)
         self.generic_visit(node)
 
     def _replace_call_argument(
