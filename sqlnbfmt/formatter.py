@@ -100,7 +100,12 @@ class SQLFormattingError(Exception):
     """Custom exception for SQL formatting errors."""
 
 
-class PlaceholderMovedError(SQLFormattingError):
+class UnsafeFormattingError(SQLFormattingError):
+    """The SQL parses, but formatting it would change what it means; the string
+    is left as is, with a warning."""
+
+
+class PlaceholderMovedError(UnsafeFormattingError):
     """sqlglot would move or rewrap a query parameter or f-string field."""
 
 
@@ -325,22 +330,28 @@ def node_offsets(node: ast.AST, line_offsets: list, source: str) -> tuple[int, i
 # Query parameter styles: %(name)s (pyformat), %s (format), ? (qmark),
 # :name and :1 (named, numeric), $1. Matches inside SQL strings and comments
 # are text, not parameters; sqlglot's tokenizer tells them apart.
-_PARAMETER = re.compile(r"%\(\w+\)s|%s|\?|(?<![:\w]):\w+|\$\d+")
-_POSITIONAL_PARAMETERS = {"%s", "?"}
+_PARAMETER = re.compile(r"%%|%\(\w+\)s|%s|\?|(?<![:\w]):\w+|\$\d+")
+# Drivers fill these in by position anywhere in the text, even in comments
+_POSITIONAL = re.compile(r"%%|%s|\?")
 
 # Tokens whose text is a value (string literals, quoted names), as opposed to
 # SQL code. Comments aren't tokens: sqlglot attaches them to a neighbour.
+# Looked up by name: older sqlglot versions lack some (NATIONAL_RAW_STRING).
 _LITERAL_TOKENS = {
-    TokenType.STRING,
-    TokenType.IDENTIFIER,
-    TokenType.BIT_STRING,
-    TokenType.HEX_STRING,
-    TokenType.BYTE_STRING,
-    TokenType.NATIONAL_STRING,
-    TokenType.NATIONAL_RAW_STRING,
-    TokenType.RAW_STRING,
-    TokenType.HEREDOC_STRING,
-    TokenType.UNICODE_STRING,
+    getattr(TokenType, name)
+    for name in (
+        "STRING",
+        "IDENTIFIER",
+        "BIT_STRING",
+        "HEX_STRING",
+        "BYTE_STRING",
+        "NATIONAL_STRING",
+        "NATIONAL_RAW_STRING",
+        "RAW_STRING",
+        "HEREDOC_STRING",
+        "UNICODE_STRING",
+    )
+    if hasattr(TokenType, name)
 }
 
 
@@ -362,29 +373,66 @@ def _unique_prefix(text: str, base: str) -> str:
     return prefix
 
 
-def _newlines_in_strings(sql: str, dialect: str | None) -> set[int]:
-    """Positions of line breaks that are part of a SQL string's or quoted name's
-    value (re-indenting them would change it)."""
-    positions = set()
-    for token in _tokenize(sql, dialect):
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _newlines_in_values(sql: str, dialect: str | None) -> set[int]:
+    """Positions of line breaks inside a SQL string, quoted name or block comment.
+
+    Re-indenting those would change a string's value, or make a comment grow
+    on every run (sqlglot keeps comment text as written).
+    """
+    positions: set[int] = set()
+
+    def add(start: int, text: str) -> None:
+        positions.update(start + i for i, ch in enumerate(text) if ch == "\n")
+
+    gap_start = 0  # text between tokens is whitespace and comments
+    for token in [*_tokenize(sql, dialect), None]:
+        gap_end = token.start if token else len(sql)
+        for comment in _BLOCK_COMMENT.finditer(sql, gap_start, gap_end):
+            add(comment.start(), comment.group(0))
+        if token is None:
+            break
         if token.token_type in _LITERAL_TOKENS:
-            text = sql[token.start : token.end + 1]
-            positions.update(token.start + i for i, ch in enumerate(text) if ch == "\n")
+            add(token.start, sql[token.start : token.end + 1])
+        gap_start = token.end + 1
     return positions
 
 
-def _stand_in_uses(tokens: list[Token], stand_ins: set[str]) -> dict[str, list[bool]]:
-    """Per stand-in, each use as a code token: whether it's wrapped in parens."""
+def _stand_in_uses(
+    sql: str, tokens: list[Token], stand_ins: set[str]
+) -> tuple[dict[str, list[bool]], list[str]]:
+    """Per stand-in, each use as a code token: whether it's wrapped in parens;
+    and the source of each literal containing one (e.g. '%{v}%')."""
     uses: dict[str, list[bool]] = {token: [] for token in stand_ins}
+    literals = []
     for i, token in enumerate(tokens):
-        if token.token_type in _LITERAL_TOKENS or token.text not in stand_ins:
+        if token.token_type in _LITERAL_TOKENS:
+            source = sql[token.start : token.end + 1]
+            if any(stand_in in source for stand_in in stand_ins):
+                literals.append(source)
+            continue
+        if token.text not in stand_ins:
             continue
         before = tokens[i - 1].token_type if i > 0 else None
         after = tokens[i + 1].token_type if i + 1 < len(tokens) else None
         uses[token.text].append(
             before == TokenType.L_PAREN and after == TokenType.R_PAREN
         )
-    return {token: sorted(found) for token, found in uses.items()}
+    return {token: sorted(found) for token, found in uses.items()}, sorted(literals)
+
+
+def _unquoted(statements: list) -> list:
+    """The statements with identifiers unquoted, for comparing meaning: sqlglot
+    may quote a name the dialect reserves (rank -> `rank`), which is harmless."""
+
+    def unquote(node: exp.Expression) -> exp.Expression:
+        if isinstance(node, exp.Identifier) and node.quoted:
+            return exp.Identifier(this=node.this, quoted=False)
+        return node
+
+    return [stmt.transform(unquote) if stmt else stmt for stmt in statements]
 
 
 def _check_placeholders(
@@ -393,7 +441,6 @@ def _check_placeholders(
     formatted_sql: str,
     dialect: str | None,
     stand_ins: list[str],
-    positional: set[str],
 ) -> None:
     """Raises PlaceholderMovedError if formatting moved or reinterpreted one.
 
@@ -401,12 +448,12 @@ def _check_placeholders(
     that may be a whole clause), so formatting must leave each one where it was:
 
     - Each one is still a code token, as often as before: not moved into a
-      string (INTERVAL %s DAY -> INTERVAL '%s DAY') or a comment.
+      string (INTERVAL %s DAY -> INTERVAL '%s DAY') or a comment. A string
+      holding one is written exactly as before: a field's value may contain
+      quotes or backslashes, so "{name}" -> '{name}' or $${v}$$ -> '{v}' breaks.
     - No parentheses added around it (VALUES %s -> VALUES (%s) breaks
       psycopg2's execute_values) and no alias made of it (SELECT {distinct} a
       -> SELECT {distinct} AS a).
-    - Positional parameters (%s, ?) bind by order, so they keep their order
-      (sqlglot reorders e.g. OFFSET/LIMIT, or LIMIT ? into T-SQL TOP (?)).
     - A stand-in isn't turned into an alias, or into the expression an alias
       names, unless the original wrote AS there: in f"FROM t {where_clause}"
       sqlglot reads the field as a table alias and prints FROM t AS {where_clause}.
@@ -419,18 +466,12 @@ def _check_placeholders(
     for token in stand_ins:
         if formatted_sql.count(token) != original_sql.count(token):
             raise PlaceholderMovedError(f"formatting would alter placeholder {token}")
-    if _stand_in_uses(formatted_tokens, names) != _stand_in_uses(
-        original_tokens, names
+    if _stand_in_uses(formatted_sql, formatted_tokens, names) != _stand_in_uses(
+        original_sql, original_tokens, names
     ):
         raise PlaceholderMovedError(
             "formatting would quote or parenthesize a query parameter or f-string field"
         )
-    if positional:
-        order = [t.text for t in formatted_tokens if t.text in positional]
-        if order != [t.text for t in original_tokens if t.text in positional]:
-            raise PlaceholderMovedError(
-                "formatting would reorder positional query parameters"
-            )
     upper_stand_ins = {token.upper() for token in stand_ins}
     for statement in statements:
         for alias in statement.find_all(exp.Alias, exp.TableAlias):
@@ -506,7 +547,7 @@ def format_sql_code(
                 )
 
         def stand_in(match: re.Match) -> str:
-            if not all(is_code[match.start() : match.end()]):
+            if match.group(0) == "%%" or not all(is_code[match.start() : match.end()]):
                 return match.group(0)  # in a string or comment: text, keep as is
             token = f"{prefix}{len(parameters)}_"
             parameters[token] = match.group(0)
@@ -514,41 +555,60 @@ def format_sql_code(
 
         temp_sql = _PARAMETER.sub(stand_in, temp_sql)
         stand_ins = [*(placeholders or ()), *parameters]
-        positional = {t for t, p in parameters.items() if p in _POSITIONAL_PARAMETERS}
 
         temp_sql = temp_sql.strip()
 
         # Parse and format SQL
         statements = parse(temp_sql, read=dialect)
-        # A parameter style we didn't recognize would be rewritten per dialect
-        if any(stmt.find(exp.Placeholder) for stmt in statements if stmt):
-            raise PlaceholderMovedError(
-                "the SQL has a query parameter that formatting could rewrite"
-            )
+        # Placeholders left in the tree are styles we don't swap (PySpark's
+        # {name}, duckdb's $name); fine if printed back as written, otherwise
+        # sqlglot would rewrite them for the dialect
+        for stmt in statements:
+            for placeholder in stmt.find_all(exp.Placeholder) if stmt else ():
+                if placeholder.sql(dialect=dialect) not in temp_sql:
+                    raise PlaceholderMovedError(
+                        "the SQL has a query parameter that formatting could rewrite"
+                    )
+
+        # A line magic must stay on one line; collapsing whitespace instead
+        # would change strings ('a  b' -> 'a b')
+        single_line = force_single_line or (is_magic_command and not is_cell_magic)
         formatted_parts = []
         for stmt in statements:
             formatted_parts.append(
                 stmt.sql(
-                    pretty=not force_single_line,
+                    pretty=not single_line,
                     indent=config.indent_width,
                     dialect=dialect,
                 )
             )
-        separator = "; " if force_single_line else ";\n"
-        formatted_sql = separator.join(formatted_parts)
+        separator = "; " if single_line else ";\n"
+        formatted_sql = separator.join(formatted_parts).strip()
+        if single_line and "\n" in formatted_sql:
+            raise SQLFormattingError("the SQL doesn't fit on one line")
 
-        # Apply formatting based on context
-        if is_magic_command and not is_cell_magic:
-            # Line magic: single line
-            formatted_sql = " ".join(formatted_sql.split())
-        elif force_single_line:
-            formatted_sql = " ".join(formatted_sql.split())
-        else:
-            formatted_sql = formatted_sql.strip()
+        _check_placeholders(statements, temp_sql, formatted_sql, dialect, stand_ins)
 
-        _check_placeholders(
-            statements, temp_sql, formatted_sql, dialect, stand_ins, positional
-        )
+        # The output must mean what the input did: guards against printer bugs
+        # in the sqlglot versions we support (e.g. before 30.23, pretty output
+        # indented the second line of a quoted name like `x\ny`)
+        if _unquoted(parse(formatted_sql, read=dialect)) != _unquoted(statements):
+            raise UnsafeFormattingError("the formatted SQL would read differently")
+
+        # %s and ? bind by position, wherever they are (drivers fill them in
+        # even inside comments), so their order must not change: sqlglot
+        # reorders OFFSET/LIMIT, turns LIMIT ? into T-SQL TOP (?), and moves
+        # or drops comments. Stand-ins make each parameter distinguishable.
+        positional = [t for t, p in parameters.items() if p in ("%s", "?")]
+        order = re.compile("|".join([*map(re.escape, positional), _POSITIONAL.pattern]))
+
+        def positional_order(text: str) -> list[str]:
+            return [m for m in order.findall(text) if m != "%%"]
+
+        if positional_order(formatted_sql) != positional_order(temp_sql):
+            raise PlaceholderMovedError(
+                "formatting would reorder positional query parameters"
+            )
 
         # Restore query parameters; f-string fields are restored by the caller
         for token, original in parameters.items():
@@ -561,7 +621,7 @@ def format_sql_code(
         return formatted_sql
 
     except SQLFormattingError:
-        raise  # our own errors (e.g. PlaceholderMovedError) keep their type
+        raise  # our own errors (e.g. UnsafeFormattingError) keep their type
     except errors.ParseError as e:
         raise SQLFormattingError(f"Failed to parse SQL code: {e}")
     except Exception as e:  # noqa: BLE001 - sqlglot raises many types; normalize them
@@ -772,7 +832,7 @@ class SQLStringFormatter(ast.NodeVisitor):
                     placeholders=placeholders or None,
                     force_single_line=force_single_line,
                 )
-            except PlaceholderMovedError as e:
+            except UnsafeFormattingError as e:
                 self.logger.warning(f"line {node.lineno}: SQL formatting skipped: {e}")
                 return None
             except SQLFormattingError:
@@ -815,7 +875,7 @@ class SQLStringFormatter(ast.NodeVisitor):
         if block_indent is not None and "\n" in formatted_sql:
             # Lines continuing a multi-line SQL string are part of its value
             try:
-                in_string = _newlines_in_strings(formatted_sql, self.dialect)
+                in_string = _newlines_in_values(formatted_sql, self.dialect)
             except SQLFormattingError:
                 return None
             lines, position = [], 0
@@ -1022,6 +1082,7 @@ def format_cell_source(
         return code
 
     lines = _LINE_BREAK.split(code)
+    line_starts = build_line_offsets(code)
 
     # Look for magic commands
     magic_cmd = None
@@ -1043,11 +1104,23 @@ def format_cell_source(
 
     if magic_cmd:
         is_cell_magic = magic_cmd.startswith("%%sql")
+        magic_line = lines[magic_cmd_index]
+        line_start = line_starts[magic_cmd_index]
+        line_end = line_start + len(magic_line)
+        # The %%sql line (with arguments such as "df <<" or a connection) and
+        # everything before it, line breaks included, are kept as written
+        body_start = (
+            line_starts[magic_cmd_index + 1]
+            if magic_cmd_index + 1 < len(line_starts)
+            else len(code)
+        )
 
         if is_cell_magic:
-            sql_code = "\n".join(lines[magic_cmd_index + 1 :]).strip()
+            sql_code = code[body_start:].strip()
         else:
-            sql_code = lines[magic_cmd_index][len(magic_cmd) :].strip()
+            sql_code = magic_line.strip()[len(magic_cmd) :].strip()
+        if not sql_code:
+            return code
 
         try:
             formatted_sql = format_sql_code(
@@ -1059,19 +1132,15 @@ def format_cell_source(
             )
 
             if is_cell_magic:
-                pre_magic = "\n".join(lines[:magic_cmd_index])
-                if pre_magic:
-                    return f"{pre_magic}\n{magic_cmd}\n{formatted_sql}"
-                return f"{magic_cmd}\n{formatted_sql}"
-            else:
-                # Keep the lines before and after the line magic as they are
-                return "\n".join(
-                    [
-                        *lines[:magic_cmd_index],
-                        f"{magic_cmd} {formatted_sql}",
-                        *lines[magic_cmd_index + 1 :],
-                    ]
-                )
+                if body_start == line_end:  # no line break after the magic line
+                    return f"{code[:line_end]}\n{formatted_sql}"
+                return code[:body_start] + formatted_sql
+            # Keep the lines before and after the line magic as they are
+            indent = magic_line[: len(magic_line) - len(magic_line.lstrip())]
+            return (
+                f"{code[:line_start]}{indent}{magic_cmd} {formatted_sql}"
+                + code[line_end:]
+            )
 
         except SQLFormattingError as e:
             logger.warning(f"SQL magic formatting skipped: {e}")

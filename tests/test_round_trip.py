@@ -480,7 +480,8 @@ def test_parameters_after_dialect_specific_quoting_are_kept(dialect, sql):
 def test_multiline_values_in_every_dialect_keep_their_value(dialect, sql, value):
     source = f'def _():\n    cursor.execute("""{sql}""")\n'
     formatted = fmt(source, dialect)
-    assert formatted != source
+    # Formatted with current sqlglot; older versions indent quoted names, which
+    # the re-parse check catches, leaving the string as is
     assert value in formatted
 
 
@@ -510,7 +511,7 @@ def test_skip_hint_with_carriage_returns():
 def test_cell_magic_with_carriage_return_keeps_its_sql():
     source = "%%sql\rSELECT a, b FROM t WHERE c = 1"
     formatted = format_cell_source(source, FormattingConfig(), None, LOGGER)
-    assert formatted.startswith("%%sql\n")
+    assert formatted.startswith("%%sql\rSELECT\n")
     assert "FROM t" in formatted
 
 
@@ -518,3 +519,124 @@ def test_line_magic_keeps_the_lines_after_it():
     source = "# setup\n%sql select a, b from t where c = 1\nx = _\nprint(x)"
     formatted = format_cell_source(source, FormattingConfig(), None, LOGGER)
     assert formatted == "# setup\n%sql SELECT a, b FROM t WHERE c = 1\nx = _\nprint(x)"
+
+
+# --- Fourth #34 review: literals around fields, comments, magics ------------
+
+
+@pytest.mark.parametrize(
+    ("source", "dialect"),
+    [
+        # sqlglot rewrites the quotes around a field; a value with ' then breaks
+        ("q = f'SELECT a FROM t WHERE name = \"{name}\" AND b = 1'\n", "mysql"),
+        ('q = f"SELECT a FROM t WHERE body = $${body}$$ AND b = 1"\n', "postgres"),
+        (
+            "q = f\"SELECT a FROM t WHERE REGEXP_CONTAINS(x, r'{pat}') AND b = 1\"\n",
+            "bigquery",
+        ),
+        # Drivers fill in %s inside comments too; sqlglot moves or drops comments
+        (
+            (
+                'cursor.execute("""SELECT a FROM t\nWHERE a = %s\n-- AND b = %s\n'
+                'LIMIT %s""", p)\n'
+            ),
+            None,
+        ),
+        ('cursor.execute("SELECT a FROM t WHERE NOT /* %s */ a = %s", p)\n', None),
+    ],
+    ids=[
+        "double-quoted-field",
+        "dollar-quoted-field",
+        "raw-string-field",
+        "param-in-moved-comment",
+        "param-in-dropped-comment",
+    ],
+)
+def test_unsafe_rewrites_are_left_alone(source, dialect, caplog):
+    caplog.set_level(logging.WARNING)
+    assert fmt(source, dialect) == source
+    assert "SQL formatting skipped" in caplog.text
+
+
+def test_escaped_percent_is_not_a_parameter():
+    source = 'cursor.execute("SELECT a %%s FROM t WHERE x = %s AND y = 1", p)\n'
+    formatted = fmt(source)
+    assert formatted.count("%%s") == 1
+    assert formatted.count("%s") == source.count("%s")
+
+
+@pytest.mark.parametrize(
+    ("source", "dialect", "kept"),
+    [
+        (
+            'spark.sql("SELECT * FROM {df} WHERE x > {v} AND y = 1", df=df, v=1)\n',
+            "spark",
+            ["{df}", "{v}"],
+        ),
+        ('con.sql("SELECT a FROM t WHERE x = $name AND y = 1")\n', "duckdb", ["$name"]),
+    ],
+    ids=["pyspark-args", "duckdb-named"],
+)
+def test_placeholders_printed_as_written_are_formatted(source, dialect, kept):
+    try:
+        sqlglot.parse(source.split('"')[1], read=dialect)
+    except sqlglot.errors.ParseError:
+        pytest.skip("this sqlglot version can't parse the syntax")
+    formatted = fmt(source, dialect)
+    assert formatted != source
+    for placeholder in kept:
+        assert formatted.count(placeholder) == 1
+
+
+def test_block_comment_in_call_argument_is_stable():
+    source = (
+        'def _():\n    pd.read_sql("""SELECT a /* x\n  y */ FROM t WHERE b = 1""", c)\n'
+    )
+    once = fmt(source)
+    assert once != source
+    assert "/* x\n  y */" in once
+    assert fmt(once) == once
+
+
+def test_printer_bugs_are_caught_by_reparsing(monkeypatch, caplog):
+    """A wrong but valid rewrite from sqlglot leaves the string as is."""
+    caplog.set_level(logging.WARNING)
+    original_sql = sqlglot.exp.Expression.sql
+
+    def buggy_sql(self, *args, **kwargs):
+        return original_sql(self, *args, **kwargs).replace("FROM t", "FROM u")
+
+    monkeypatch.setattr(sqlglot.exp.Expression, "sql", buggy_sql)
+    source = 'pd.read_sql("select a, b from t where c = 1 and d = 2")\n'
+    assert fmt(source) == source
+    assert "would read differently" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # Magic arguments (an assignment, a connection) are kept
+        ("%%sql df <<\nselect a from t", "%%sql df <<\nSELECT\n  a\nFROM t"),
+        (
+            "%%sql postgresql://u@h/db\r\nselect a from t",
+            "%%sql postgresql://u@h/db\r\nSELECT\n  a\nFROM t",
+        ),
+        # Line breaks around the magic are kept
+        ("# c\r\n%sql SELECT a FROM t", "# c\r\n%sql SELECT a FROM t"),
+        ("%sql select a from t\r\nx = _", "%sql SELECT a FROM t\r\nx = _"),
+        # String values in a line magic are kept
+        ("%sql select 'a  b' from t", "%sql SELECT 'a  b' FROM t"),
+        # A bare %sql has no SQL to format
+        ("%sql\nselect a from t", "%sql\nselect a from t"),
+    ],
+    ids=[
+        "assignment",
+        "connection-crlf",
+        "crlf-before",
+        "crlf-after",
+        "string-spaces",
+        "bare-line-magic",
+    ],
+)
+def test_magic_cells_keep_what_they_dont_format(source, expected):
+    assert format_cell_source(source, FormattingConfig(), None, LOGGER) == expected
