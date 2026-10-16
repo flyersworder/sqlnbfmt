@@ -91,6 +91,8 @@ class FormattingConfig:
     sql_decorators: set[str] = field(
         default_factory=lambda: set(DEFAULT_SQL_DECORATORS)
     )
+    # Deprecated: never had any effect (sqlglot decides line breaks). Kept so
+    # existing configs and FormattingConfig(...) calls keep working.
     single_line_threshold: int = 80
     indent_width: int = 4
     dialect: str | None = None
@@ -217,6 +219,11 @@ def _config_from_dict(config: dict) -> FormattingConfig:
     if not isinstance(options, dict):
         raise ConfigError(f"'formatting_options' must be a mapping, got {options!r}")
     _warn_unknown_keys(config, options)
+    if "single_line_threshold" in options:
+        logging.getLogger("formatter").warning(
+            "'formatting_options.single_line_threshold' is deprecated and has no "
+            "effect; remove it from your configuration"
+        )
     return FormattingConfig(
         # is_likely_sql matches keywords against upper-cased code
         sql_keywords={

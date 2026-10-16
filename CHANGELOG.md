@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `extend_sql_keywords`, `extend_function_names` and `extend_sql_decorators` config options, which add entries to the built-in lists instead of replacing them, so adding one function name no longer drops defaults like `sql` (Marimo's `mo.sql()`) ([#26](https://github.com/flyersworder/sqlnbfmt/issues/26))
 - The unknown-option warning suggests the intended option for kebab-case keys (e.g. `extend-function-names`, `indent-width`), at the top level and under `formatting_options`
 
+### Deprecated
+
+- `formatting_options.single_line_threshold`: it was documented as the maximum length before splitting SQL, but no version ever read it; line breaks are decided by sqlglot. Setting it now logs a warning, and it will be removed in a future release
+
 ### Fixed
 
 - **Query parameters were corrupted with the postgres, duckdb and bigquery dialects.** `%s`/`?` parameters became `%(AUTO_PLACEHOLDER_0)s`, `$AUTO_PLACEHOLDER_0` or `@AUTO_PLACEHOLDER_0`, f-string fields became `%({table})s`, `${table}` or `@{table}`, and user-written `:name` parameters were converted to the dialect's own style. All parameter styles (`%s`, `?`, `%(name)s`, `:name`, `:1`, `$1`) and f-string fields now pass through unchanged; `?` or `%s` inside SQL string literals and comments is left as text, using sqlglot's tokenizer for the dialect to tell them apart (so `'\'` in postgres, `$$…$$` bodies and MySQL/BigQuery `#` comments are read correctly). Queries with 11 or more parameters were also mangled (`_1` matched inside `_10`)
